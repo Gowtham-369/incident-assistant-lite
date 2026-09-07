@@ -3,9 +3,11 @@ using IncidentAssistant.Metadata.Responses;
 using IncidentAssistant.Metadata.Requests;
 using IncidentAssistant.Api.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 
 namespace IncidentAssistant.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/[controller]")]
 public class IncidentsController(IIncidentService service) : ControllerBase

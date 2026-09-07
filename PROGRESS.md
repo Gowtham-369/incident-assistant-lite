@@ -100,17 +100,26 @@ especially on AI endpoint calls, which are exactly the slow, per-token-billed
 - **Time actually taken:**
 
 ### Block 4 — Hardening + kick off APIM provisioning
-- [ ] Done
-- **What I did:**
+- [x] Done
+- **What I did:
+
+- Added Validation Annotations on Request record DTO
 - **Surprises / gotchas:**
 - **Time actually taken:**
 
 ### Block 5 — Entra ID app registration (API)
-- [ ] Done
-- **App registration details:** (tenant id, client id — ok to note here; never secrets)
-- **What I did:**
-- **Surprises / gotchas:**
-
+- [x] Done
+- **App registration details:** incident-api, single tenant, no redirect URI
+  (APIs don't redirect — that's a client concern). Application ID URI:
+  `api://<client-id>`, exposed scope Incidents.ReadWrite.
+- **What I did:** Registered the API in Entra ID, exposed the scope, added
+  Microsoft.Identity.Web, configured AzureAd section in appsettings.json
+  (tenant + client IDs are public identifiers, not secrets — safe to commit),
+  added UseAuthentication before UseAuthorization, locked IncidentsController
+  with [Authorize].
+- **Verified:** anonymous GET /api/incidents → 401 with WWW-Authenticate: Bearer.
+- **Surprises / gotchas:** none — but middleware order (authn before authz) is
+  a classic failure point worth remembering.
 ### Block 6 — Prove auth works
 - [ ] Done
 - **How I got a test token:**
@@ -196,6 +205,30 @@ Free-form. New concepts, aha moments, stuff to read more about later.
   Everyday uses: forgot a file, or typo in the commit message.
   Rule: amend freely *before* pushing, never after (it replaces the commit with
   a new hash, so amending already-pushed commits breaks shared history).-
+
+
+#### -How Microsoft Entra ID authentication and authorization works?
+#### What happens at startup?
+When the app boots, AddMicrosoftIdentityWebApi registers the JWT bearer authentication handler with your tenant's settings. The first time a token needs validating, the handler fetches your tenant's OpenID Connect discovery document from https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration — a JSON file describing your tenant's token issuer and, crucially, where its public signing keys live (the JWKS endpoint). It downloads and caches those keys. That's the entire setup: your API never talks to Entra ID again per-request; it now has everything needed to verify tokens locally.
+
+#### What happens per request?
+
+Every request passes through UseAuthentication(), which asks the bearer handler: is there an `Authorization: Bearer <token>` header?
+
+**If No token:** the handler marks the request as anonymous. Then UseAuthorization() sees the [Authorize] attribute on the controller, finds no authenticated identity, and short-circuits with a 401 — your controller code never runs. The WWW-Authenticate: Bearer header is the API formally saying "this endpoint accepts bearer tokens; go get one." That's the standard challenge defined by the OAuth spec.
+
+**With a token:** the handler validates it entirely offline using the cached keys — 
+Four checks: 
+
+The signature (was this really signed by your tenant? cryptographically verified against Microsoft's public keys — this is why no secret exists on your API), 
+
+The issuer (your tenant, not someone else's), 
+
+The audience (this token was minted for `api://<your-client-id>`, not for Graph or some other API — a token being valid isn't enough, it must be for you), 
+
+The expiry. All four pass → the token's claims become the request's User identity, [Authorize] is satisfied, and your controller runs.
+
+The elegant part worth saying in an interview: the API never sees credentials and holds no secrets. It's a pure verifier — users authenticate with Entra ID, and the API just checks the cryptographic receipt.
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
