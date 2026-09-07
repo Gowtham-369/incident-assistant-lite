@@ -48,13 +48,28 @@ Record *why*, not just *what*. This is interview gold.
   .NET 9) — only the OpenAPI document is generated. Scalar at `/scalar` is the
   replacement for browser-based endpoint testing.
 - **Time actually taken:** ~30 min
-### Block 2 — EF Core + database
-- [ ] Done
-- **What I did:**
+###  Block 2 — EF Core + database
+- [x] Done
+- **What I did:** Created the `Incident` entity with `Severity` and `IncidentStatus`
+  enums, `AppDbContext` with model config + 3 seeded incidents, wired the connection
+  string to the `sql2025` container, registered the DbContext in Program.cs, ran the
+  first migration, and verified the rows exist via sqlcmd inside the container.
 - **Commands that mattered:**
+  - `dotnet add package Microsoft.EntityFrameworkCore.SqlServer` (+ `.Design`)
+  - `dotnet ef migrations add InitialCreate`
+  - `dotnet ef database update`
+  - Verify: `docker exec -it sql2025 /opt/mssql-tools18/bin/sqlcmd -S localhost
+    -U sa -P '<pw>' -C -Q "SELECT Title, Severity, Status FROM IncidentDb.dbo.Incidents"`
+- **Key design choices:**
+  - Enums stored as strings via `HasConversion<string>()` — human-readable rows,
+    at the cost of a few bytes vs int storage
+  - Seed data via `HasData` must be deterministic (hardcoded Guids/dates baked
+    into the migration — `Guid.NewGuid()` here would make every migration see
+    "changed" data)
+  - Connection string lives only in `appsettings.Development.json` (gitignored),
+    never in `appsettings.json`
 - **Surprises / gotchas:**
 - **Time actually taken:**
-
 ### Block 3 — CRUD
 - [ ] Done
 - **What I did:**
