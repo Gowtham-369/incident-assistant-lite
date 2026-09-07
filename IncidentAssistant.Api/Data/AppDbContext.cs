@@ -1,5 +1,6 @@
 using IncidentAssistant.Api.Models;
 using Microsoft.EntityFrameworkCore;
+using IncidentAssistant.Metadata.Enums;
 
 namespace IncidentAssistant.Api.Data;
 

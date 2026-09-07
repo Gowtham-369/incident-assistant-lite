@@ -1,7 +1,7 @@
+using IncidentAssistant.Metadata.Enums;
+
 namespace IncidentAssistant.Api.Models;
 
-public enum Severity { Low, Medium, High, Critical }
-public enum IncidentStatus { Open, InProgress, Resolved }
 
 public class Incident
 {

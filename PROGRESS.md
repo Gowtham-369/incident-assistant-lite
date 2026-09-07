@@ -71,8 +71,31 @@ Record *why*, not just *what*. This is interview gold.
 - **Surprises / gotchas:**
 - **Time actually taken:**
 ### Block 3 — CRUD
-- [ ] Done
+- [x] Done
 - **What I did:**
+- **Scoped DI lifetime** — `AddScoped<IIncidentService, IncidentService>()` means
+  one instance per HTTP request: everything in one request shares that instance,
+  the next request gets a fresh one. Chosen because the service depends on
+  AppDbContext, which is itself scoped (a DbContext is a unit of work, not
+  thread-safe, must not live across requests). The trio: Transient = new every
+  resolve, Scoped = per request, Singleton = one for app lifetime.
+
+- **JsonStringEnumConverter** — added via AddJsonOptions. Without it enums
+  serialize as their underlying numbers (`"severity": 2`); with it they become
+  strings (`"severity": "High"`), both in responses and when parsing request
+  bodies/query params. Pairs with `HasConversion<string>()` on the EF side:
+  enums are human-readable in JSON *and* in the database rows.
+
+- **CancellationToken** — a cooperative "stop signal" threaded through async
+  calls. ASP.NET Core creates one per request and cancels it if the client
+  disconnects (closed tab, timeout, navigation away). By accepting it in the
+  controller and passing it down (service → EF → SQL), an abandoned request
+  actually cancels the database query instead of burning resources computing a
+  response nobody will read. Cooperative = nothing is forcibly killed; each
+  layer checks the token and throws TaskCanceledException is a subclass of the OperationCanceledException at a safe point.
+  Cost of adding it: one parameter. It matters most for slow/expensive queries —
+especially on AI endpoint calls, which are exactly the slow, per-token-billed
+  kind of work we want to stop early.
 - **Surprises / gotchas:**
 - **Time actually taken:**
 
