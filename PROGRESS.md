@@ -121,8 +121,33 @@ especially on AI endpoint calls, which are exactly the slow, per-token-billed
 - **Surprises / gotchas:** none — but middleware order (authn before authz) is
   a classic failure point worth remembering.
 ### Block 6 — Prove auth works
-- [ ] Done
+- [x] Done
 - **How I got a test token:**
+- - **OAuth 2.0 auth code + PKCE flow, tested via Postman** — tokens are issued to
+  *client* registrations, not resource/API registrations. So the setup takes two
+  app registrations playing different roles:
+  - `incident-api` (resource): exposes scope `Incidents.ReadWrite`, audience
+    `api://<api-client-id>`, validates tokens — never requests them.
+  - `incident-spa` (client): granted the delegated permission to that scope
+    (+ admin consent), requests tokens on behalf of the signed-in user.
+
+  Postman OAuth 2.0 config that worked:
+  - Grant: Authorization Code (With PKCE), Code Challenge: SHA-256
+  - Auth URL / Token URL: login.microsoftonline.com/`<spa-tenant-id>`/oauth2/v2.0/{authorize,token}
+  - Client ID: the *SPA's* GUID; Client Secret: empty (PKCE replaces it — public
+    clients prove themselves with a per-request code challenge, no stored secret)
+  - Scope: `api://<api-client-id>/Incidents.ReadWrite` (the API's GUID — two
+    different GUIDs playing two different roles). Also, can get this from incident-spa App in registered applications in Entra ID as we already gave delegated to permissions to incident-spa to use incident-api
+  - Client Authentication: **send credentials in body** (Microsoft's token
+    endpoint expects client_id in the body, not a Basic Auth header)
+
+  Flow: Get New Access Token → browser opens Microsoft login → sign in → auth
+  code redirects to Postman's callback → Postman redeems code + PKCE verifier
+  for the access token → Bearer token on the request → API validates
+  sig/iss/aud/exp offline → 200.
+
+  Verified claims on jwt.ms: `aud` = `api://<api-client-id>`, `iss` = my tenant,
+  `scp` = Incidents.ReadWrite, `exp` ≈ issue + 60-90 min.
 - **Surprises / gotchas:**
 
 ### Block 7 — Host the API
@@ -183,8 +208,9 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 
 | Symptom | Root cause | Fix |
 |---|---|---|
-|  |  |  |
-
+| |  |  |
+| AADSTS900144 "request body must contain client_id" (Postman token fetch) | Postman's Client Authentication was set to Basic Auth header; Microsoft's token endpoint expects client_id in the request body for public clients | Changed to "Send client credentials in body" |
+| AADSTS9002327 "SPA tokens may only be redeemed via cross-origin requests" | Postman's callback URL was registered under the *Single-page application* platform, whose auth codes can only be redeemed by browser requests carrying an Origin header — Postman is a native app | Added a *Mobile and desktop applications* platform with the Postman callback; kept localhost:5173 under SPA for React. One client, two platforms, different redemption rules |
 ---
 
 ## Things I Learned
