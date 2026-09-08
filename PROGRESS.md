@@ -150,11 +150,38 @@ especially on AI endpoint calls, which are exactly the slow, per-token-billed
   `scp` = Incidents.ReadWrite, `exp` ≈ issue + 60-90 min.
 - **Surprises / gotchas:**
 
-### Block 7 — Host the API
-- [ ] Done
-- **Where it's hosted / URL:**
-- **Surprises / gotchas:**
+###     Block 7 — Host the API
+- [x] Done
+- **Where it's hosted / URL:** https://app-incident-gowtham-aqepfqgxffa5dweb.centralus-01.azurewebsites.net
+  (App Service, Linux, B1, Central US — note Azure now appends a unique suffix to
+  default hostnames)
+- **Database:** Azure SQL serverless free tier (sql-incident-gowtham.database.windows.net /
+  IncidentDb, Central US) — 100k vCore-seconds + 32 GB/mo free, AutoPause on
+  exhaustion AND on idle. Local Docker SQL stays as the dev database; same
+  migrations applied to both.
+- **What I did:**
+  1. Created SQL server + DB in portal (free serverless offer, SQL auth,
+     firewall: Allow Azure services + my client IP). If you're adding your laptop IP to an Azure SQL firewall, Storage firewall, Key Vault, etc., you normally want your public IP, not the 192.168.x.x local address. You can get public IP using `curl ifconfig.me
+`
+or:
 
+        `curl https://api.ipify.org`
+
+
+  2. Verified connectivity with sqlcmd from the local sql2025 container as a client
+  3. Applied EF migrations to the cloud DB via `dotnet ef database update
+     --connection "..."` — schema + seed data arrived together
+  4. Created App Service (Linux, .NET 10, B1, same region as the DB —
+     app↔DB proximity matters, gateway placement doesn't)
+  5. Set connection string `DefaultConnection` (type SQLAzure) in App Service Environment
+     variables — overrides appsettings.json at runtime; the config layering
+     pattern. Becomes env var SQLAZURECONNSTR_Default inside the container.
+  6. Deployed: `dotnet publish -c Release` → zip contents (DLLs at zip root!) →
+     `az webapp deploy --type zip` or can upload the zip file in deployments menu in App Service/Azure Portal
+  7. Verified: curl → 401 + WWW-Authenticate (middleware alive), Postman with
+     token → 200 with seeded incidents
+- **Time actually taken:** (fill in — well over 30 min, and that's normal for
+  a first manual deployment)
 ### Block 8 — APIM
 - [ ] Done
 - **Gateway URL:**
@@ -211,6 +238,11 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | |  |  |
 | AADSTS900144 "request body must contain client_id" (Postman token fetch) | Postman's Client Authentication was set to Basic Auth header; Microsoft's token endpoint expects client_id in the request body for public clients | Changed to "Send client credentials in body" |
 | AADSTS9002327 "SPA tokens may only be redeemed via cross-origin requests" | Postman's callback URL was registered under the *Single-page application* platform, whose auth codes can only be redeemed by browser requests carrying an Origin header — Postman is a native app | Added a *Mobile and desktop applications* platform with the Postman callback; kept localhost:5173 under SPA for React. One client, two platforms, different redemption rules |
+| SQL server creation rejected: "subscription does not have access to create a server in the selected region" | Personal subscriptions are capacity-blocked from popular regions (East US) for Azure SQL | Switched to Central US; kept App Service in the same region as the DB |
+| "Login failed for user 'incidentadmin'" from sqlcmd despite correct password | zsh quoting corrupted the password passed via -P | Interactive prompt (omit -P) bypasses the shell — logged in fine. Tell: login-failed = you *reached* the server; firewall failures hang then name your IP |
+| `az webapp deploy` polled "Starting the site..." for 6+ min | CLI polling was stale — logs showed the site started in ~2 min | Ctrl+C the poll; `az webapp log tail` is the truth, CLI polling is a convenience |
+| First cloud request: 500 after 22s; retry: 200, nothing changed | Serverless SQL auto-pauses when idle; first connection triggers a 30-60s resume that outlives the ~15s connection timeout | Expected behavior. Mitigation: EnableRetryOnFailure in UseSqlServer (TODO before next deploy). Tell: ~20s failure = timeout/unreachable; 1-2s = auth rejection |
+
 ---
 
 ## Things I Learned
@@ -230,8 +262,7 @@ Free-form. New concepts, aha moments, stuff to read more about later.
   the existing message; use `-m "..."` instead to fix the message itself.
   Everyday uses: forgot a file, or typo in the commit message.
   Rule: amend freely *before* pushing, never after (it replaces the commit with
-  a new hash, so amending already-pushed commits breaks shared history).-
-
+  a new hash, so amending already-pushed commits breaks shared history).
 
 #### -How Microsoft Entra ID authentication and authorization works?
 #### What happens at startup?
@@ -255,6 +286,24 @@ The audience (this token was minted for `api://<your-client-id>`, not for Graph 
 The expiry. All four pass → the token's claims become the request's User identity, [Authorize] is satisfied, and your controller runs.
 
 The elegant part worth saying in an interview: the API never sees credentials and holds no secrets. It's a pure verifier — users authenticate with Entra ID, and the API just checks the cryptographic receipt.
+
+Block 7 - Deploying App in App Service and Connecting to Azure SQL Database
+
+- **sqlcmd is a client, not part of the engine** — `-S` points it at any
+  reachable SQL Server; used the local container's sqlcmd to talk to Azure SQL.
+- **A deployment is just: publish → zip → hand the zip over.** `az webapp deploy
+  --type zip` is the same act as the enterprise pipeline's final task. Build
+  automation (Oryx) only kicks in if you ship sources instead of a pre-built app.
+- **TLS terminates at the App Service front end** — the container sees plain
+  HTTP, hence the benign "Failed to determine the https port for redirect"
+  warning from UseHttpsRedirection. Users still always get HTTPS.
+- **The debugging ladder for App Service:** log tail first, then runtime config
+  (`az webapp config show` → linuxFxVersion), then package structure
+  (`unzip -l` — DLLs at root). The logs outrank every other signal.
+- **Failure timing is diagnostic:** instant 401 = auth; 1-2s SQL error = login
+  rejected; ~20s = timeout/unreachable/waking. Reading the clock narrows the
+  suspect list before reading the message.
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
