@@ -134,22 +134,25 @@ especially on AI endpoint calls, which are exactly the slow, per-token-billed
   Postman OAuth 2.0 config that worked:
   - Grant: Authorization Code (With PKCE), Code Challenge: SHA-256
   - Auth URL / Token URL: login.microsoftonline.com/`<spa-tenant-id>`/oauth2/v2.0/{authorize,token}
-  - Client ID: the *SPA's* GUID; Client Secret: empty (PKCE replaces it — public
-    clients prove themselves with a per-request code challenge, no stored secret)
+  - Client ID: the *SPA* client id (not the API's!) 
+  - Client Secret: empty (PKCE replaces it — public
+      clients prove themselves with a per-request code challenge, no stored secret)
   - Scope: `api://<api-client-id>/Incidents.ReadWrite` (the API's GUID — two
     different GUIDs playing two different roles). Also, can get this from incident-spa App in registered applications in Entra ID as we already gave delegated to permissions to incident-spa to use incident-api
+    
   - Client Authentication: **send credentials in body** (Microsoft's token
-    endpoint expects client_id in the body, not a Basic Auth header)
+        endpoint expects client_id in the body, not a Basic Auth header)
 
-  Flow: Get New Access Token → browser opens Microsoft login → sign in → auth
-  code redirects to Postman's callback → Postman redeems code + PKCE verifier
-  for the access token → Bearer token on the request → API validates
-  sig/iss/aud/exp offline → 200.
+      Flow: Get New Access Token → browser opens Microsoft login → sign in → auth
+      code redirects to Postman's callback → Postman redeems code + PKCE verifier
+      for the access token → Bearer token on the request → API validates
+      sig/iss/aud/exp offline → 200.
 
-  Verified claims on jwt.ms: `aud` = `api://<api-client-id>`, `iss` = my tenant,
-  `scp` = Incidents.ReadWrite, `exp` ≈ issue + 60-90 min.
-- **Surprises / gotchas:**
+      Verified claims on jwt.ms: `aud` = `api://<api-client-id>`, `iss` = my tenant,
+      `scp` = Incidents.ReadWrite, `exp` ≈ issue + 60-90 min.
+- **Surprises / gotchas:
 
+  - Btw,`<spa-tenant-id>` and `<api-tenant-id>` are  same because they are using same tenant - Microsoft Entra ID/ Active Directory ID.
 ###     Block 7 — Host the API
 - [x] Done
 - **Where it's hosted / URL:** https://app-incident-gowtham-aqepfqgxffa5dweb.centralus-01.azurewebsites.net
@@ -183,11 +186,44 @@ or:
 - **Time actually taken:** (fill in — well over 30 min, and that's normal for
   a first manual deployment)
 ### Block 8 — APIM
-- [ ] Done
-- **Gateway URL:**
-- **Policies applied:**
-- **Surprises / gotchas:**
-
+- [x] Done
+- **Gateway URL:** https://apim-incident-gowtham.azure-api.net/IncidentAssistant/V1/api/incidents
+- **OpenAPI spec creation + import:**
+  - Exported the spec from the running API (`/openapi/v1.json`) into
+    `apim/specs/incident-api.openapi.json` — repo holds the artifact, APIM
+    imports from it (APIOps-style: repo is source of truth, portal is the
+    deployment target)
+  - Import maps the spec to gateway operations automatically; backend set via
+    Web service URL to the App Service; "Subscription required" left on
+  - Import initially failed: .NET 10 emits OpenAPI 3.1, where nullable
+    properties are `"type": ["string","null"]` (array form) — APIM's importer
+    expects 3.0's scalar `"type": "string"` + `nullable: true` and errored with
+    "Cannot create a scalar value from this type of node" on every nullable
+    property. Fixed by pinning generation to 3.0 via `AddOpenApi(options =>
+    options.OpenApiVersion = OpenApi3_0)` and regenerating. Bonus catch: the
+    error's schema list exposed the leftover WeatherForecast template endpoint
+- **Policies applied:** subscription key (built-in) + validate-jwt (inbound, all
+  operations) — policy XML versioned in apim/policies/
+- **Why the gateway validates JWT when the API already does:**
+  - *Security (defense in depth):* two independent checkpoints mean neither
+    failure mode exists — junk traffic dies at the edge for near-zero gateway
+    cost instead of burning App Service compute, and the backend never trusts
+    that the edge did its job (a discovered backend URL doesn't bypass auth)
+  - *Architecture (gateway owns the perimeter):* identity established at the
+    gateway lets cross-cutting concerns live in policy, not backend code —
+    per-user rate limiting off token claims, scope checks before routing,
+    centralized who-called-what logging. The API stays focused on incidents;
+    future backend APIs inherit the same enforced perimeter by policy
+  - *Same three ingredients as the in-app validation* (OIDC discovery URL,
+    audience, issuer) — expressed in policy XML instead of
+    AddMicrosoftIdentityWebApi's C#
+- **Hardening TODO:** restrict the App Service to accept traffic only from APIM
+  (Access Restrictions / IP rules on the App Service), so the backend URL stops
+  being publicly routable and the gateway becomes the only path in. Completes
+  the perimeter story; do alongside next week's pipeline work
+- **Verified:** no key → 401 from APIM; key but no token → 401 from APIM
+  (validate-jwt — trace confirmed the request never left the gateway); key +
+  valid token → 200 through the full chain: Postman → APIM → App Service → Azure SQL
 ---
 
 ## Day 2 — Frontend + AI
@@ -242,7 +278,7 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | "Login failed for user 'incidentadmin'" from sqlcmd despite correct password | zsh quoting corrupted the password passed via -P | Interactive prompt (omit -P) bypasses the shell — logged in fine. Tell: login-failed = you *reached* the server; firewall failures hang then name your IP |
 | `az webapp deploy` polled "Starting the site..." for 6+ min | CLI polling was stale — logs showed the site started in ~2 min | Ctrl+C the poll; `az webapp log tail` is the truth, CLI polling is a convenience |
 | First cloud request: 500 after 22s; retry: 200, nothing changed | Serverless SQL auto-pauses when idle; first connection triggers a 30-60s resume that outlives the ~15s connection timeout | Expected behavior. Mitigation: EnableRetryOnFailure in UseSqlServer (TODO before next deploy). Tell: ~20s failure = timeout/unreachable; 1-2s = auth rejection |
-
+| validate-jwt rejected a token the App Service accepted (401 at gateway) | Token was v1.0: Entra issues the token version the *resource's* requestedAccessTokenVersion demands (default 1), even via v2.0 endpoints — so iss was sts.windows.net/<tenant>/, not login.microsoftonline.com/.../v2.0; aud was api://<guid>, not the bare GUID. Microsoft.Identity.Web tolerates both forms; my handwritten policy was strict | Decoded token on jwt.ms (ver, iss, aud claims), matched policy values character-for-character. Alternative fix: set requestedAccessTokenVersion: 2 on the app registration — cleaner, but changes tokens for all consumers |
 ---
 
 ## Things I Learned
@@ -266,7 +302,7 @@ Free-form. New concepts, aha moments, stuff to read more about later.
 
 #### -How Microsoft Entra ID authentication and authorization works?
 #### What happens at startup?
-When the app boots, AddMicrosoftIdentityWebApi registers the JWT bearer authentication handler with your tenant's settings. The first time a token needs validating, the handler fetches your tenant's OpenID Connect discovery document from https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration — a JSON file describing your tenant's token issuer and, crucially, where its public signing keys live (the JWKS endpoint). It downloads and caches those keys. That's the entire setup: your API never talks to Entra ID again per-request; it now has everything needed to verify tokens locally.
+When the app boots, AddMicrosoftIdentityWebApi registers the JWT bearer authentication handler with your tenant's settings. The first time a token needs validating, the handler fetches your tenant's OpenID Connect discovery document from https://login.microsoftonline.com/`<tenant-id>`/v2.0/.well-known/openid-configuration — a JSON file describing your tenant's token issuer and, crucially, where its public signing keys live (the JWKS endpoint). It downloads and caches those keys. That's the entire setup: your API never talks to Entra ID again per-request; it now has everything needed to verify tokens locally.
 
 #### What happens per request?
 
@@ -304,6 +340,23 @@ Block 7 - Deploying App in App Service and Connecting to Azure SQL Database
   rejected; ~20s = timeout/unreachable/waking. Reading the clock narrows the
   suspect list before reading the message.
 
+Block 8 - APIM
+
+- **Ocp-Apim-Trace: true** + the Ocp-Apim-Trace-Location response header = full
+  gateway execution trace showing every policy step and its verdict. APIM's
+  equivalent of the log tail — first stop for any gateway mystery.
+- **Same token, two verifiers, different tolerance:** the identical Entra token
+  got a 200 from the App Service and a 401 from my APIM validate-jwt policy —
+  because validation is just string comparison between token claims and each
+  verifier's config. The token was v1.0 (`iss: sts.windows.net/<tenant>/`,
+  `aud: api://<guid>`) since Entra mints the version the *resource's*
+  `requestedAccessTokenVersion` demands (default v1), even when the client
+  uses v2.0 endpoints. Microsoft.Identity.Web is deliberately lenient (accepts
+  both issuer/audience forms); my handwritten policy was exactly as strict as
+  what I typed — the v2.0 issuer string — so it rejected honestly. Debugging
+  playbook for this class of bug: decode the real token (jwt.ms), read the
+  strict validator's complaint (APIM trace), diff the two configs, match
+  character-for-character.
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
