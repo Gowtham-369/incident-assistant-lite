@@ -229,14 +229,45 @@ or:
 ## Day 2 — Frontend + AI
 
 ### Block 1 — React scaffold
-- [ ] Done
-- **What I did:**
+- [x] Done
+- **What I did:** Scaffolded with Vite (react-ts template, ESLint over Oxlint —
+  enterprise familiarity over raw speed at this project's scale), set up
+  .env.local (VITE_API_BASE = APIM gateway URL, VITE_APIM_KEY), created the
+  auth/api/components/types skeleton, wrote types/incidents.ts mirroring the
+  Metadata contracts, gutted the starter App.tsx.
+- **Commands that mattered:**
+  - `npm create vite@latest incident-ui -- --template react-ts`
+  - `.nvmrc` (22) + `nvm alias default 22` — pin and persist the Node version
+- **Surprises / gotchas:**
+  - Node 22.4.1 failed EBADENGINE checks silently-then-loudly: Vite 8/rolldown
+    need >=22.12; install proceeded anyway, then the dev server crashed with
+    "Cannot find native binding." Fixed via nvm (`nvm install 22`), which also
+    surfaced the per-shell-only nature of `nvm use`.
+  - Parent folder `Namaste-C#` broke Vite's dev server — `#` is the URL fragment
+    delimiter, and Vite derives module URLs from file paths. Renamed to
+    Namaste-CSharp. Compiled tooling (.NET) never cared; URL-based dev tooling does.
+  - Frontend secrets are only soft-hidden: VITE_ vars are inlined into shipped
+    JS, visible in DevTools. Acceptable for the APIM subscription key (a
+    throttling credential, not the security boundary — the JWT is); noted for
+    any future secret that would need a backend-for-frontend instead.
+  - app.zip got tracked before the gitignore rule existed; gitignore only
+    governs untracked files. `git check-ignore -v --no-index` reveals rules for
+    already-tracked files; `git rm --cached` untracks without deleting locally.
+- **Time actually taken:**
 
 ### Block 2 — MSAL login
-- [ ] Done
-- **What I did:**
-- **Surprises / gotchas:**
-
+- [x] Done
+- **What I did:** Installed @azure/msal-browser + msal-react (v5.21.0),
+  configured msalConfig with the incident-spa client id + Incidents.ReadWrite
+  scope, wired PublicClientApplication + handleRedirectPromise() in main.tsx,
+  built login/logout with explicit React state after msal-react's
+  Authenticated/UnauthenticatedTemplate proved unworkable for local logout.
+- **Verified:** cold sign-in (full redirect → Microsoft → back, authenticated
+  view renders), sign-out (instant flip, no Entra screen), re-sign-in (instant —
+  SSO cookie alive, no password prompt).
+- **Surprises / gotchas:** see Things I Learned — the MSAL templates to own-state saga
+  and the AADSTS50011 redirect URI gap. See more in Bugs and Fixes and Things I Learned sections.
+- **Time actually taken:**
 ### Block 3 — API client + incident list (expect CORS fight)
 - [ ] Done
 - **The CORS fix that finally worked:**
@@ -280,7 +311,8 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | First cloud request: 500 after 22s; retry: 200, nothing changed | Serverless SQL auto-pauses when idle; first connection triggers a 30-60s resume that outlives the ~15s connection timeout | Expected behavior. Mitigation: EnableRetryOnFailure in UseSqlServer (TODO before next deploy). Tell: ~20s failure = timeout/unreachable; 1-2s = auth rejection |
 | validate-jwt rejected a token the App Service accepted (401 at gateway) | Token was v1.0: Entra issues the token version the *resource's* requestedAccessTokenVersion demands (default 1), even via v2.0 endpoints — so iss was sts.windows.net/<tenant>/, not login.microsoftonline.com/.../v2.0; aud was api://<guid>, not the bare GUID. Microsoft.Identity.Web tolerates both forms; my handwritten policy was strict | Decoded token on jwt.ms (ver, iss, aud claims), matched policy values character-for-character. Alternative fix: set requestedAccessTokenVersion: 2 on the app registration — cleaner, but changes tokens for all consumers 
 | app.zip showed "Modified" despite matching a gitignore rule; `git check-ignore -v` printed nothing | The zip was already *tracked* (committed before/with the rule) — gitignore only governs untracked files, and check-ignore consults the index by default, so a tracked file reports as not-ignored | `git check-ignore -v --no-index` reveals the matching rule; `git rm --cached` untracks while keeping the local file. Trilogy complete: rules match anywhere without leading `/`, `-v` shows *why*, `--no-index` shows *would-be* ignores for tracked files |
-| Vite dev server started but failed to load /src/main.tsx | Parent folder named `Namaste-C#` — `#` is the URL fragment delimiter, so Vite's file-path-derived URLs truncated at it | Renamed folder to Namaste-CSharp. Lesson: dev servers map paths to URLs, so URL-special characters (#, ?, %) in directory names break web tooling that compiled-language tooling tolerates fine ||
+| Vite dev server started but failed to load /src/main.tsx | Parent folder named `Namaste-C#` — `#` is the URL fragment delimiter, so Vite's file-path-derived URLs truncated at it | Renamed folder to Namaste-CSharp. Lesson: dev servers map paths to URLs, so URL-special characters (#, ?, %) in directory names break web tooling that compiled-language tooling tolerates fine 
+| AADSTS50011 redirect URI mismatch on first MSAL login | The localhost:5173 SPA redirect URI planned in Day 1 Block 6 was never actually added — registration only had Postman's desktop callback | Added SPA platform + http://localhost:5173. Note: platform type is half the config — SPA platform's cross-origin redemption rule is *required* by MSAL in the browser, the same rule that blocked Postman |
 ---
 
 ## Things I Learned
@@ -359,6 +391,39 @@ Block 8 - APIM
   playbook for this class of bug: decode the real token (jwt.ms), read the
   strict validator's complaint (APIM trace), diff the two configs, match
   character-for-character.
+
+- ## Day 2
+
+- msal-react's Templates are event-driven, not storage-driven — and why I
+  stopped using them for logout:**
+- `AuthenticatedTemplate`/`UnauthenticatedTemplate` subscribe to MSAL's
+internal account-change *events*, not to sessionStorage. `clearCache()`
+empties storage correctly but fires no such event, so the UI didn't
+flip until a manual refresh — storage and rendered state had silently
+diverged.
+- Tried moving `onRedirectNavigate` to logout*() call options (blocked by a
+v5 type change), then to msalConfig.auth globally (an AI-suggested "fix").
+That broke *login* instead: onRedirectNavigate is global in v5, applying to
+every redirect MSAL performs — it silently no-opped loginRedirect's
+navigation too. Lesson: verify a "scoped to X" config suggestion actually
+is scoped that way before applying it, especially across library majors
+that move fast (v3→v4→v5 all reshaped this API).
+- Final design: drop the Templates, own `account` as explicit React state.
+`handleRedirectPromise()` in main.tsx settles the redirect before App
+mounts; a lazy `useState(() => ...)` initializer reads MSAL's account list
+once (not a `useEffect` + setState-on-mount, which the linter correctly
+flagged as an avoidable extra render — reading a startup value once is a
+job for state initialization, not effect synchronization); `clearCache` +
+`setAccount(null)` handles logout with zero network round-trip.
+- Net take: sometimes the more robust move is to stop chasing a library's
+internal event contract across major versions and just own the state
+transition explicitly. Less "magic," more predictable, easier to explain.
+- Small bonus bug caught by TypeScript itself: a ternary with swapped
+branches (`account ? <SignIn/> : <SignedInAs/>`) surfaced as a type error
+on `account.name` in the falsy branch — the type system was correctly
+reporting the logic bug, not being pedantic.
+- Login and refresh are the same event from App's perspective: loginRedirect fully unmounts the app (real page nav), and handleRedirectPromise() writes the new account to storage *before* App remounts — so the lazy useState initializer just reads current truth on that fresh mount, no transition logic needed. Logout has no such remount, which is exactly why it alone needed an explicit setAccount(null).
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
