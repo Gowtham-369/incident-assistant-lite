@@ -466,6 +466,58 @@ reporting the logic bug, not being pedantic.
   calling setIncidents is what schedules the second render (table). Render is
   pure description of UI from state; effects are the sanctioned side channel;
   state changes are the only thing that loops back to another render.
+-
+**useCallback vs plain function for refresh() — side-by-side comparison**
+
+  Version A — plain function:
+```typescript
+  const refresh = () => {
+    incidentsApi
+      .getAll(instance, account)
+      .then(setIncidents)
+      .catch((e) => setError(e.message));
+  };
+
+  useEffect(() => {
+    refresh();
+  }, [instance, account]);
+```
+
+  Version B — useCallback:
+```typescript
+  const refresh = useCallback(() => {
+    incidentsApi
+      .getAll(instance, account)
+      .then(setIncidents)
+      .catch((e) => setError(e.message));
+  }, [instance, account]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+```
+
+  | Property | Version A (plain function) | Version B (useCallback) |
+  |---|---|---|
+  | Runtime correctness today | Correct — effect deps are the real values (instance, account) | Correct — same timing, via refresh's stabilized identity |
+  | Callable from IncidentForm / mutation handlers | Yes | Yes |
+  | ESLint react-hooks/exhaustive-deps | Warns: "missing dependency: refresh" | Clean — refresh IS the listed dep |
+  | Risk if the warning gets "fixed" naively | Adding refresh to deps without memoizing → new reference every render → effect reruns every render → fetch → setState → rerender → infinite loop | Already safe — refresh's identity only changes when instance/account do |
+  | Extra cost | None | Small: dep comparison + memo slot each render |
+
+  **Judgment call:** for a single-component, non-CI-gated personal project,
+  Version A is genuinely fine — no bug, no performance issue, arguably more
+  readable since it doesn't require explaining useCallback to understand it.
+  I used Version B because (a) it satisfies exhaustive-deps cleanly, which
+  matters the moment this sits in a team repo with lint enforced in CI, and
+  (b) it makes the *correct* fix the *easy* fix — anyone extending this later
+  can safely add refresh to a dependency array without first deriving the
+  closure-safety argument Version A quietly relies on. That's the real
+  justification: not "A is buggy," but "B removes a footgun for whoever edits
+  this after me, at the cost of one memoization." In an interview, I'd frame
+  this as knowing when a lint rule is protecting against a real failure mode
+  vs. being pedantic — here it's the former, because the failure mode
+  (missing-dep → naive fix → infinite loop) is a genuinely common React bug.
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
