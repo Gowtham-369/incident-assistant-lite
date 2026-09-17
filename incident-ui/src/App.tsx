@@ -3,6 +3,7 @@ import { apiRequest } from './auth/msalConfig';
 import { useState } from 'react';
 import { useMsal} from '@azure/msal-react';
 import type { AccountInfo } from "@azure/msal-browser";
+import { IncidentList } from './components/IncidentList';
 
 function App() {
   const {instance} = useMsal();
@@ -30,6 +31,7 @@ function App() {
         <>
           <p>Signed in as <strong>{account.name}</strong> ({account.username})</p>
           <button onClick={logout}>Sign out</button>
+          {account && <IncidentList account={account} />}
         </>
         
       ) : (

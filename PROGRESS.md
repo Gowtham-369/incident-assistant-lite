@@ -268,10 +268,14 @@ or:
 - **Surprises / gotchas:** see Things I Learned — the MSAL templates to own-state saga
   and the AADSTS50011 redirect URI gap. See more in Bugs and Fixes and Things I Learned sections.
 - **Time actually taken:**
-### Block 3 — API client + incident list (expect CORS fight)
-- [ ] Done
-- **The CORS fix that finally worked:**
-
+### Block 3 — API client + incident list
+- [x] Done
+- **What I did:** apiClient.ts (acquireTokenSilent + popup fallback on
+  InteractionRequiredAuthError, Bearer + subscription key headers), IncidentList
+  component fetching on mount, wired into App behind the authenticated branch
+- **The CORS fix that finally worked:** cors policy in APIM inbound, positioned
+  BEFORE `<base/>` and before validate-jwt — preflight OPTIONS carries no auth
+  header and must clear CORS before any auth policy would reject it
 ### Block 4 — Create/update UI
 - [ ] Done
 - **What I did:**
@@ -313,6 +317,7 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | app.zip showed "Modified" despite matching a gitignore rule; `git check-ignore -v` printed nothing | The zip was already *tracked* (committed before/with the rule) — gitignore only governs untracked files, and check-ignore consults the index by default, so a tracked file reports as not-ignored | `git check-ignore -v --no-index` reveals the matching rule; `git rm --cached` untracks while keeping the local file. Trilogy complete: rules match anywhere without leading `/`, `-v` shows *why*, `--no-index` shows *would-be* ignores for tracked files |
 | Vite dev server started but failed to load /src/main.tsx | Parent folder named `Namaste-C#` — `#` is the URL fragment delimiter, so Vite's file-path-derived URLs truncated at it | Renamed folder to Namaste-CSharp. Lesson: dev servers map paths to URLs, so URL-special characters (#, ?, %) in directory names break web tooling that compiled-language tooling tolerates fine 
 | AADSTS50011 redirect URI mismatch on first MSAL login | The localhost:5173 SPA redirect URI planned in Day 1 Block 6 was never actually added — registration only had Postman's desktop callback | Added SPA platform + http://localhost:5173. Note: platform type is half the config — SPA platform's cross-origin redemption rule is *required* by MSAL in the browser, the same rule that blocked Postman |
+| VS Code integrated terminal still showed 22.4.1 after .zshrc fix confirmed working in Terminal.app | VS Code caches its environment snapshot at app launch; existing terminal panels (and sometimes new ones) inherit that stale snapshot rather than re-sourcing shell config | Full quit + relaunch VS Code(Cmd +Q and launch) forced a fresh environment read. Lesson: an editor's integrated terminal is not always "just a shell" — it can hold its own environment cache independent of your actual shell config, so a working fix in Terminal.app doesn't guarantee the IDE reflects it until restarted |
 ---
 
 ## Things I Learned
@@ -424,6 +429,43 @@ on `account.name` in the falsy branch — the type system was correctly
 reporting the logic bug, not being pedantic.
 - Login and refresh are the same event from App's perspective: loginRedirect fully unmounts the app (real page nav), and handleRedirectPromise() writes the new account to storage *before* App remounts — so the lazy useState initializer just reads current truth on that fresh mount, no transition logic needed. Logout has no such remount, which is exactly why it alone needed an explicit setAccount(null).
 
+- **CORS is a browser-only enforcement mechanism — nothing else in this project
+  ever triggered it.** curl, Postman, and sqlcmd all send HTTP requests
+  directly with no same-origin policy involved; the *browser* is what inserts
+  the Origin header, runs a preflight OPTIONS check against
+  Access-Control-Allow-* response headers, and blocks the real request if the
+  server didn't explicitly permit it. APIM sent zero CORS headers the whole
+  of Day 1 and nothing failed, because nothing enforcing CORS had touched it
+  yet — React was the first client in the project a browser actually
+  mediated. Corollary: policy order matters here specifically because a
+  preflight OPTIONS carries no Authorization header, so CORS has to be
+  handled (and positioned, in APIM's inbound policy XML) before any policy
+  — like validate-jwt — that would otherwise reject it.
+-
+- **APIM's Design tab (Frontend / Inbound / Backend / Outbound) is one linear
+ pipeline, not four independent places to attach policies:**
+  - *Frontend* is descriptive only — the caller's side, the operation
+    definition. Nothing executes there; its pencil/dropdown just edit the
+    operation's path/parameters.
+  - *Inbound processing* is the first real execution point — every policy
+    here runs top to bottom before the request leaves APIM. cors,
+    validate-jwt, rate limiting, transformation all belong here.
+  - *Backend* is the proxy target (the App Service URL), with a narrow `base`
+    slot for backend-specific concerns like retry — rarely touched for a
+    single-backend setup.
+  - *Outbound processing* runs after the backend responds, before APIM
+    returns the response to the caller (header scrubbing, response shaping).
+  - Actual request path: Frontend (arrival) → Inbound (policies execute) →
+    Backend (proxied out) → response → Outbound (policies execute) →
+    Frontend (delivered). CORS has to live in Inbound — there's no earlier
+    execution point to decide whether to let a preflight through — and above
+    validate-jwt within Inbound, since preflight OPTIONS carries no auth header.
+  
+- **useEffect doesn't rerender — setState inside it does.** Effect runs
+  post-commit (after "Loading…" was already painted); the fetch resolving and
+  calling setIncidents is what schedules the second render (table). Render is
+  pure description of UI from state; effects are the sanctioned side channel;
+  state changes are the only thing that loops back to another render.
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
