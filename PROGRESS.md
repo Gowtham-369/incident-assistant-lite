@@ -277,14 +277,26 @@ or:
   BEFORE `<base/>` and before validate-jwt — preflight OPTIONS carries no auth
   header and must clear CORS before any auth policy would reject it
 ### Block 4 — Create/update UI
-- [ ] Done
+- [x] Done
 - **What I did:**
 
 ### Block 5 — Azure OpenAI resource + deployment
-- [ ] Done
-- **Deployment name / model:**
-- **What I did:**
-
+- [x] Done
+- **Deployment name / model:** gpt-4.1-mini, GlobalStandard, incidentresolutionagent.services.ai.azure.com
+- **What I did:** Deployed via Foundry portal, installed OpenAI NuGet package
+  (not Azure.AI.OpenAI — corrected mid-block), registered ResponsesClient as a
+  DI singleton via api key + ResponsesClientOptions, model specified per-request
+  via CreateResponseOptions.Model rather than at client construction
+- **Verified:** smoke-test endpoint returned a full ResponseResult with
+  status success, correct model, and real token usage — then fixed
+  response.Value.GetOutputText() (CreateResponse returns a
+  ClientResult<ResponseResult> wrapper; .Value unwraps to the real result)
+  to get clean text instead of the raw object graph
+- **Foundry portal's endpoint copy-box shows the full call URL for a specific
+  operation (.../openai/v1/responses), not the base endpoint config wants.**
+  The SDK's client type owns route construction internally — ResponsesClient
+  appends /responses itself once given the base /openai/v1. Config should stay
+  at the base; the working smoke test (200, real usage) already proved this.
 ### Block 6 — Triage endpoint
 - [ ] Done
 - **Prompt that worked:**
@@ -317,7 +329,8 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | app.zip showed "Modified" despite matching a gitignore rule; `git check-ignore -v` printed nothing | The zip was already *tracked* (committed before/with the rule) — gitignore only governs untracked files, and check-ignore consults the index by default, so a tracked file reports as not-ignored | `git check-ignore -v --no-index` reveals the matching rule; `git rm --cached` untracks while keeping the local file. Trilogy complete: rules match anywhere without leading `/`, `-v` shows *why*, `--no-index` shows *would-be* ignores for tracked files |
 | Vite dev server started but failed to load /src/main.tsx | Parent folder named `Namaste-C#` — `#` is the URL fragment delimiter, so Vite's file-path-derived URLs truncated at it | Renamed folder to Namaste-CSharp. Lesson: dev servers map paths to URLs, so URL-special characters (#, ?, %) in directory names break web tooling that compiled-language tooling tolerates fine 
 | AADSTS50011 redirect URI mismatch on first MSAL login | The localhost:5173 SPA redirect URI planned in Day 1 Block 6 was never actually added — registration only had Postman's desktop callback | Added SPA platform + http://localhost:5173. Note: platform type is half the config — SPA platform's cross-origin redemption rule is *required* by MSAL in the browser, the same rule that blocked Postman |
-| VS Code integrated terminal still showed 22.4.1 after .zshrc fix confirmed working in Terminal.app | VS Code caches its environment snapshot at app launch; existing terminal panels (and sometimes new ones) inherit that stale snapshot rather than re-sourcing shell config | Full quit + relaunch VS Code(Cmd +Q and launch) forced a fresh environment read. Lesson: an editor's integrated terminal is not always "just a shell" — it can hold its own environment cache independent of your actual shell config, so a working fix in Terminal.app doesn't guarantee the IDE reflects it until restarted |
+| VS Code integrated terminal still showed 22.4.1 after .zshrc fix confirmed working in Terminal.app | VS Code caches its environment snapshot at app launch; existing terminal panels (and sometimes new ones) inherit that stale snapshot rather than re-sourcing shell config | Full quit + relaunch VS Code(Cmd +Q and launch) forced a fresh environment read. Lesson: an editor's integrated terminal is not always "just a shell" — it can hold its own environment cache independent of your actual shell config, so a working fix in Terminal.app doesn't guarantee the IDE reflects it until restarted 
+| Three rounds of CS compile errors wiring up ResponsesClient (wrong package, wrong constructor overload, wrong options type) | The OpenAI .NET SDK is in active breaking-change churn — even Microsoft's own docs pages disagreed with each other depending on publish date (OpenAIResponseClient vs ResponsesClient, GetOpenAIResponseClient() vs GetResponsesClient(), model-at-construction vs model-per-request). Portal quickstart code and my own knowledge were both stale relative to the installed package version | Resolved by trusting compiler errors and IDE signature help over any written sample, converging error-by-error: CS1739 revealed no 'model' param existed on that overload → CS1503 revealed the real options type (ResponsesClientOptions) → final shape confirmed by a working 200 response with real token usage. Lesson: for an SDK in active flux, the compiler and the installed package are more current truth than documentation, official or otherwise — debug by reading what the compiler actually says the shape is, not by pattern-matching to a remembered or published sample ||
 ---
 
 ## Things I Learned
