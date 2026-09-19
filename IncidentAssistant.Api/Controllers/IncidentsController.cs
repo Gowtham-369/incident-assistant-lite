@@ -10,7 +10,7 @@ namespace IncidentAssistant.Api.Controllers;
 [Authorize]
 [ApiController]
 [Route("api/[controller]")]
-public class IncidentsController(IIncidentService service) : ControllerBase
+public class IncidentsController(IIncidentService service, ITriageService triageService) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<IncidentDto>>> GetAll(
@@ -37,4 +37,14 @@ public class IncidentsController(IIncidentService service) : ControllerBase
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
         => await service.DeleteAsync(id, ct) ? NoContent() : NotFound();
+
+    [HttpPost("{id:guid}/triage")]
+    public async Task<ActionResult<TriageResult>> Triage(Guid id, CancellationToken ct)
+    {
+        var incident = await service.GetByIdAsync(id, ct);
+        if (incident is null) return NotFound();
+
+        var result = await triageService.TriageAsync(incident.Title, incident.Description, ct);
+        return Ok(result);
+    }
 }

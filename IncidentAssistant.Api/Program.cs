@@ -45,6 +45,8 @@ builder.Services.AddSingleton(sp =>
         options: new ResponsesClientOptions { Endpoint = new Uri(endpoint) });
 });
 
+builder.Services.AddScoped<ITriageService, TriageService>();
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

@@ -302,6 +302,7 @@ or:
 - **Prompt that worked:**
 - **Surprises / gotchas:**
 
+
 ### Block 7 — Triage UI
 - [ ] Done
 - **What I did:**
@@ -330,7 +331,8 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | Vite dev server started but failed to load /src/main.tsx | Parent folder named `Namaste-C#` — `#` is the URL fragment delimiter, so Vite's file-path-derived URLs truncated at it | Renamed folder to Namaste-CSharp. Lesson: dev servers map paths to URLs, so URL-special characters (#, ?, %) in directory names break web tooling that compiled-language tooling tolerates fine 
 | AADSTS50011 redirect URI mismatch on first MSAL login | The localhost:5173 SPA redirect URI planned in Day 1 Block 6 was never actually added — registration only had Postman's desktop callback | Added SPA platform + http://localhost:5173. Note: platform type is half the config — SPA platform's cross-origin redemption rule is *required* by MSAL in the browser, the same rule that blocked Postman |
 | VS Code integrated terminal still showed 22.4.1 after .zshrc fix confirmed working in Terminal.app | VS Code caches its environment snapshot at app launch; existing terminal panels (and sometimes new ones) inherit that stale snapshot rather than re-sourcing shell config | Full quit + relaunch VS Code(Cmd +Q and launch) forced a fresh environment read. Lesson: an editor's integrated terminal is not always "just a shell" — it can hold its own environment cache independent of your actual shell config, so a working fix in Terminal.app doesn't guarantee the IDE reflects it until restarted 
-| Three rounds of CS compile errors wiring up ResponsesClient (wrong package, wrong constructor overload, wrong options type) | The OpenAI .NET SDK is in active breaking-change churn — even Microsoft's own docs pages disagreed with each other depending on publish date (OpenAIResponseClient vs ResponsesClient, GetOpenAIResponseClient() vs GetResponsesClient(), model-at-construction vs model-per-request). Portal quickstart code and my own knowledge were both stale relative to the installed package version | Resolved by trusting compiler errors and IDE signature help over any written sample, converging error-by-error: CS1739 revealed no 'model' param existed on that overload → CS1503 revealed the real options type (ResponsesClientOptions) → final shape confirmed by a working 200 response with real token usage. Lesson: for an SDK in active flux, the compiler and the installed package are more current truth than documentation, official or otherwise — debug by reading what the compiler actually says the shape is, not by pattern-matching to a remembered or published sample ||
+| Three rounds of CS compile errors wiring up ResponsesClient (wrong package, wrong constructor overload, wrong options type) | The OpenAI .NET SDK is in active breaking-change churn — even Microsoft's own docs pages disagreed with each other depending on publish date (OpenAIResponseClient vs ResponsesClient, GetOpenAIResponseClient() vs GetResponsesClient(), model-at-construction vs model-per-request). Portal quickstart code and my own knowledge were both stale relative to the installed package version | Resolved by trusting compiler errors and IDE signature help over any written sample, converging error-by-error: CS1739 revealed no 'model' param existed on that overload → CS1503 revealed the real options type (ResponsesClientOptions) → final shape confirmed by a working 200 response with real token usage. Lesson: for an SDK in active flux, the compiler and the installed package are more current truth than documentation, official or otherwise — debug by reading what the compiler actually says the shape is, not by pattern-matching to a remembered or published sample |
+| 404 on POST /triage despite correct route code and a working GET on the same base path | Stray space in the Postman URL (likely from the switch to a saved request with a manually-placed variable) produced a path that didn't exactly match the {id:guid}/triage route template — ASP.NET Core routing requires exact segment matches, so it 404'd rather than misrouting | Found via Postman's console (bottom bar / Cmd+Alt+C), which shows the raw outgoing request exactly as sent — caught the extra space invisible in the URL bar's rendering. Lesson: when a route "should" exist but 404s, check the byte-exact request before doubting the server code |
 ---
 
 ## Things I Learned
@@ -531,6 +533,14 @@ reporting the logic bug, not being pedantic.
   this as knowing when a lint rule is protecting against a real failure mode
   vs. being pedantic — here it's the former, because the failure mode
   (missing-dep → naive fix → infinite loop) is a genuinely common React bug.
+
+**C# 11 raw string interpolation brace rule:** the number of leading $ signs
+  sets how many consecutive braces open an interpolation hole. $"""...""" (one
+  $) means a single { starts a hole, so literal JSON braces conflict (CS9006).
+  $$"""...""" (two $) raises the hole size to {{ }}, making single braces
+  literal automatically — no escaping needed for JSON content, but real
+  interpolations need matching double braces: {{variableName}}.
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
