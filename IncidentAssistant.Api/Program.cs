@@ -61,17 +61,22 @@ app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// TEMP smoke test — delete before any deployment to production. This is just to verify that the Azure OpenAI API is reachable and working.
-app.MapGet("/api/_smoketest", (ResponsesClient client, IConfiguration config) =>
+// TEMP smoke test — delete/disable before deploying to production. This is just to verify that the Azure OpenAI API is reachable and working.
+/*
+if(app.Environment.IsDevelopment())
 {
-    var options = new CreateResponseOptions
+    app.MapGet("/api/_smoketest", async (ResponsesClient client, IConfiguration config) =>
     {
-        Model = config["AzureOpenAI:DeploymentName"],
-        InputItems = { ResponseItem.CreateUserMessageItem("Say 'ok' and nothing else.") }
-    };
-    var response = client.CreateResponse(options);
-    return Results.Ok(response.Value.GetOutputText());
-});
+        var options = new CreateResponseOptions
+        {
+            Model = config["AzureOpenAI:DeploymentName"],
+            InputItems = { ResponseItem.CreateUserMessageItem("Say 'ok' and nothing else.") }
+        };
+        var response = await client.CreateResponseAsync(options);
+        return Results.Ok(response.Value.GetOutputText());
+    });
+}
+*/
 
 app.MapControllers();
 

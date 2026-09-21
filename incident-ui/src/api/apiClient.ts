@@ -5,6 +5,7 @@ import type {
   IncidentDto,
   CreateIncidentRequest,
   UpdateIncidentRequest,
+  TriageResult,
 } from "../types/incidents";
 
 const API_BASE = import.meta.env.VITE_API_BASE;
@@ -73,4 +74,9 @@ export const incidentsApi = {
 
   remove: (instance: IPublicClientApplication, account: AccountInfo, id: string) =>
     apiFetch<void>(instance, account, `/api/incidents/${id}`, { method: "DELETE" }),
+
+  triage: (instance: IPublicClientApplication, account: AccountInfo, id: string) =>
+    apiFetch<TriageResult>(instance, account, `/api/incidents/${id}/triage`, {
+      method: "POST",
+    }),
 };

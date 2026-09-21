@@ -297,10 +297,53 @@ or:
   The SDK's client type owns route construction internally — ResponsesClient
   appends /responses itself once given the base /openai/v1. Config should stay
   at the base; the working smoke test (200, real usage) already proved this.
+###
 ### Block 6 — Triage endpoint
-- [ ] Done
-- **Prompt that worked:**
+- [x] Done
+- **What I did:**
+  - Backend: TriageResult DTO in Metadata; TriageService with a $$-raw-string
+    prompt requesting strict JSON (suggestedSeverity/suggestedCategory/
+    troubleshootingSteps), defensive markdown-fence stripping, JsonException
+    wrapped with the raw model output for debuggability
+  - POST /api/incidents/{id}/triage on IncidentsController, inherits [Authorize]
+  - Frontend: AI Triage button per row (loading state keyed by incident id),
+    suggestion banner (severity/category/steps), Apply suggestion → PUT with
+    the suggested values → clears that row's cached suggestion → refresh()
+  - Deployed to App Service (moved secret AzureOpenAI:ApiKey to App Service
+    App settings as AzureOpenAI__ApiKey; excluded appsettings.Development.json
+    from publish via a Content Update / CopyToPublishDirectory=Never override
+    in the .csproj, on top of the earlier git-untrack fix — two separate leaks
+    from two separate build systems)
+  - Regenerated OpenAPI spec, reimported into APIM: policies survived intact
+    (scoped to "All operations"); backend URL had to be manually reset from
+    the spec's localhost:5044 default to the App Service URL
+- **Verified:** full chain working from React through APIM (CORS + subscription
+  key + JWT) → App Service → Azure OpenAI, triage suggestion applied and
+  reflected in the refreshed incident row
 - **Surprises / gotchas:**
+  - Three-round OpenAI .NET SDK version churn (wrong package → wrong
+    constructor overload → wrong options type) resolved via compiler errors
+    and IDE signature help, not documentation
+  - C# 11 raw string interpolation: $$ needed once literal JSON braces appear
+    in the template (CS9006)
+  - 405 vs 404 diagnostic distinction (route matched/wrong verb vs no match at
+    all) — the latter traced to a stray space in a Postman URL, found via
+    Postman's console (raw outgoing request)
+  - New endpoint requires TWO deploys to reach users: App Service redeploy AND
+    an APIM spec reimport — backend having the route isn't sufficient
+  - appsettings.Development.json leaked via two independent mechanisms (stale
+    git tracking from Block 1 + dotnet publish's implicit content-file glob),
+    needing two separate fixes
+  -  **Two distinct state slices, deliberately never merged:** `incidents` (source
+    of truth, always from refresh()/the API) vs `triageResults` (ephemeral
+    per-row UI cache of a pending AI suggestion, keyed by incident id).
+    applySuggestion doesn't "update" triageResults with new data — it deletes
+    that row's entry once acted on, using the copy-then-delete immutable
+    pattern ({ ...s }, delete key, return new object) required because React
+    state must never be mutated in place — setState needs a new reference to
+    detect the change and trigger a re-render.**
+- **Time actually taken:**
+ 
 
 
 ### Block 7 — Triage UI
@@ -309,9 +352,23 @@ or:
 
 ### Block 8 — Polish + README
 - [ ] Done
-- **Repo URL:**
+- **Repo URL:
 
----
+
+
+
+## Day 3 (planned) — Infra as code + CI/CD
+- [ ] infrastructure/ scripts: SQL server + DB, App Service + connection string,
+      secrets via env vars (journal has the real commands)
+- [ ] 03-deploy.sh: publish → zip → az webapp deploy (Block 7/8 ritual, scripted)
+- [ ] APIM migrations via script, not portal clicks — research APIOps
+      (Azure/apiops reference implementation): extract API/policies/products to
+      repo, pipeline applies changes via CLI/ARM/Bicep. This closes the gap we
+      hit in Block 6 — reimport-vs-manual-add both required a human in the portal
+- [ ] ADO: parallelism request granted? → project, GitHub connection, workload
+      identity federation service connection, multi-stage YAML
+- [ ] EnableRetryOnFailure ships with first Day 3 deploy
+- [ ] Hardening: App Service access restricted to APIM only---
 
 ## Bugs & Fixes
 
@@ -333,6 +390,8 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 | VS Code integrated terminal still showed 22.4.1 after .zshrc fix confirmed working in Terminal.app | VS Code caches its environment snapshot at app launch; existing terminal panels (and sometimes new ones) inherit that stale snapshot rather than re-sourcing shell config | Full quit + relaunch VS Code(Cmd +Q and launch) forced a fresh environment read. Lesson: an editor's integrated terminal is not always "just a shell" — it can hold its own environment cache independent of your actual shell config, so a working fix in Terminal.app doesn't guarantee the IDE reflects it until restarted 
 | Three rounds of CS compile errors wiring up ResponsesClient (wrong package, wrong constructor overload, wrong options type) | The OpenAI .NET SDK is in active breaking-change churn — even Microsoft's own docs pages disagreed with each other depending on publish date (OpenAIResponseClient vs ResponsesClient, GetOpenAIResponseClient() vs GetResponsesClient(), model-at-construction vs model-per-request). Portal quickstart code and my own knowledge were both stale relative to the installed package version | Resolved by trusting compiler errors and IDE signature help over any written sample, converging error-by-error: CS1739 revealed no 'model' param existed on that overload → CS1503 revealed the real options type (ResponsesClientOptions) → final shape confirmed by a working 200 response with real token usage. Lesson: for an SDK in active flux, the compiler and the installed package are more current truth than documentation, official or otherwise — debug by reading what the compiler actually says the shape is, not by pattern-matching to a remembered or published sample |
 | 404 on POST /triage despite correct route code and a working GET on the same base path | Stray space in the Postman URL (likely from the switch to a saved request with a manually-placed variable) produced a path that didn't exactly match the {id:guid}/triage route template — ASP.NET Core routing requires exact segment matches, so it 404'd rather than misrouting | Found via Postman's console (bottom bar / Cmd+Alt+C), which shows the raw outgoing request exactly as sent — caught the extra space invisible in the URL bar's rendering. Lesson: when a route "should" exist but 404s, check the byte-exact request before doubting the server code |
+| appsettings.Development.json (secrets) shipped inside app.zip; git check-ignore printed no match | Two independent mechanisms conflated: (1) the file was tracked in git since Block 1's initial commit, before its gitignore rule existed — gitignore never retroactively untracks; (2) separately, dotnet publish includes appsettings*.json via the SDK's implicit content-item glob (CopyToPublishDirectory=PreserveNewest) regardless of git status entirely — .gitignore has no authority over MSBuild's publish output | git rm --cached to fix tracking; <Content Update> override with CopyToPublishDirectory=Never in the .csproj to fix publish inclusion — two separate fixes for two separate systems. Lesson: "is this file safe" has two independent questions — is it in git, and does the build system ship it — and fixing one does nothing for the other 
+| Reimport reset the backend URL to localhost:5044 | The generated OpenAPI spec's `servers` block reflects wherever you ran the export curl from — local dev, in this case — and APIM's importer uses that as the default backend on import/reimport | Manually reset Settings → Web service URL to the App Service URL post-import. Could consider fixing at the source via an AddDocumentTransformer setting a fixed prod Servers URL in Program.cs, so future regenerations are correct by default. Pattern to remember: OpenAPI reimport is now a THREE-item checklist — policies survived? backend URL correct? operations complete? — not a one-click operation ||
 ---
 
 ## Things I Learned

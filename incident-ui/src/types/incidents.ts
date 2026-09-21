@@ -24,3 +24,9 @@ export interface UpdateIncidentRequest extends CreateIncidentRequest {
   status: IncidentStatus;
   resolutionNotes?: string;
 }
+
+export interface TriageResult {
+  suggestedSeverity: Severity;
+  suggestedCategory: string;
+  troubleshootingSteps: string[];
+}
