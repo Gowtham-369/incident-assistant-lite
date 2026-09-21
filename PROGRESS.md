@@ -347,16 +347,34 @@ or:
 
 
 ### Block 7 — Triage UI
-- [ ] Done
-- **What I did:**
+- [x] Done
+- **What I did:  Covered as part of Block 6
 
 ### Block 8 — Polish + README
-- [ ] Done
-- **Repo URL:
+- [x] Done
+- **Repo URL: `https://github.com/Gowtham-369/incident-assistant-lite.git
+`
 
+ **2-minute demo script**, worth having written down before an interview, not improvised live:
 
+- Warm the API first, before anyone's watching — hit the gateway URL once (curl or a browser tab) a minute before demoing. The serverless SQL cold-start is real and you know exactly why; don't let it be your first impression.  
+- Sign in — show the Microsoft login, note it's real Entra ID, real PKCE.
 
+- Show the incidents table — mention it's flowing through APIM (CORS + JWT + subscription key) to App Service to Azure SQL.
 
+- Create one new incident live.
+
+- Click AI Triage on the checkout-latency incident — narrate what's happening while it loads (structured JSON prompt to Azure OpenAI, defensively parsed).
+
+- Click Apply suggestion — table updates.
+
+- One closing sentence: "Everything here — the auth, the gateway, the AI call — is backed by a public repo with a build journal documenting every real bug I hit getting it working."
+- ##
+## Project status: Day 1 + Day 2 complete
+All core goals met: .NET 10 API, SQL (local + Azure), OAuth 2.0/OIDC via Entra
+ID, APIM gateway with CORS + JWT validation, React + MSAL frontend, AI-powered
+triage via Azure OpenAI. Repo pushed to GitHub: [add link].
+Day 3 (infra as code + APIOps + CI/CD pipeline) tracked separately below.
 ## Day 3 (planned) — Infra as code + CI/CD
 - [ ] infrastructure/ scripts: SQL server + DB, App Service + connection string,
       secrets via env vars (journal has the real commands)
@@ -376,7 +394,6 @@ Every bug that cost >10 minutes gets a line. These become your "tell me about a 
 
 | Symptom | Root cause | Fix |
 |---|---|---|
-| |  |  |
 | AADSTS900144 "request body must contain client_id" (Postman token fetch) | Postman's Client Authentication was set to Basic Auth header; Microsoft's token endpoint expects client_id in the request body for public clients | Changed to "Send client credentials in body" |
 | AADSTS9002327 "SPA tokens may only be redeemed via cross-origin requests" | Postman's callback URL was registered under the *Single-page application* platform, whose auth codes can only be redeemed by browser requests carrying an Origin header — Postman is a native app | Added a *Mobile and desktop applications* platform with the Postman callback; kept localhost:5173 under SPA for React. One client, two platforms, different redemption rules |
 | SQL server creation rejected: "subscription does not have access to create a server in the selected region" | Personal subscriptions are capacity-blocked from popular regions (East US) for Azure SQL | Switched to Central US; kept App Service in the same region as the DB |
