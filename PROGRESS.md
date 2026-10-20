@@ -1,4 +1,4 @@
-# AI Incident Assistant Lite — Build Journal
+`# AI Incident Assistant Lite — Build Journal
 
 > How to use this: after each 30-min block (or whenever something notable happens), add a short entry. Write commands as you actually ran them, not as the docs say. Future-you reading this before an interview is the audience.
 
@@ -290,7 +290,7 @@ or:
 - **Verified:** smoke-test endpoint returned a full ResponseResult with
   status success, correct model, and real token usage — then fixed
   response.Value.GetOutputText() (CreateResponse returns a
-  ClientResult<ResponseResult> wrapper; .Value unwraps to the real result)
+  ClientResult`<ResponseResult>` wrapper; .Value unwraps to the real result)
   to get clean text instead of the raw object graph
 - **Foundry portal's endpoint copy-box shows the full call URL for a specific
   operation (.../openai/v1/responses), not the base endpoint config wants.**
@@ -610,12 +610,39 @@ reporting the logic bug, not being pedantic.
   vs. being pedantic — here it's the former, because the failure mode
   (missing-dep → naive fix → infinite loop) is a genuinely common React bug.
 
-**C# 11 raw string interpolation brace rule:** the number of leading $ signs
-  sets how many consecutive braces open an interpolation hole. $"""...""" (one
-  $) means a single { starts a hole, so literal JSON braces conflict (CS9006).
-  $$"""...""" (two $) raises the hole size to {{ }}, making single braces
+**C# 11 raw string interpolation brace rule:** the number of leading `$ `signs
+  sets how many consecutive braces open an interpolation hole. `$`"""...""" (one
+  `$`) means a single { starts a hole, so literal JSON braces conflict (CS9006).
+  `$$`"""...""" (two `$`) raises the hole size to {{ }}, making single braces
   literal automatically — no escaping needed for JSON content, but real
-  interpolations need matching double braces: {{variableName}}.
+  interpolations need matching double braces: `{{variableName}}`.
+
+## Day 3A
+
+#### Step1 Learnings: App registration vs managed identity
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Direction of trust | App registration (`incident-api`, Day 1) controls **inbound** access: callers get a token with audience `api://<client-id>` and my API validates it. Managed identity (Day 3) is **outbound**: my API proves who it is when calling Azure AI Search and Foundry | One identity answers "who may call me", the other answers "who am I when I call others" |
+| Where they live | App registrations appear under Entra **App registrations**; a system-assigned managed identity appears under **Enterprise applications** (filter: Managed Identities) | Both are service principals underneath; the difference is who owns the lifecycle |
+| Credentials | `incident-api` only validates tokens, so it needs no secret. The managed identity's credentials are created and rotated by Azure and never exposed | No secret to store, rotate, or leak |
+| Lifecycle | App registration lives until I delete it; system-assigned identity is deleted with the App Service | Use user-assigned identity if several resources must share one identity |
+| Permissions | App registration exposes **scopes** (`Incidents.ReadWrite`); managed identity gets **Azure RBAC roles** (Search Index Data Contributor, Cognitive Services OpenAI User) | Scopes gate my API; roles gate Azure resources |
+| Token audience | User token: `api://<incident-api client id>`. MI tokens: `https://search.azure.com`, `https://ai.azure.com` | One triage request carries two identities and two tokens |
+| IDs | A managed identity also has a client ID and an object (principal) ID; role assignments target the object ID | Don't confuse its client ID with the app registration's client ID |
+| Why not reuse the app registration | Possible with a client secret + `ClientSecretCredential`, the older pattern | Interview line: "App registrations for OAuth between users and my API; managed identity for service-to-service calls inside Azure, so there are no stored credentials" |
+
+Azure role assignments (RBAC)
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Anatomy | A role assignment = who (principal) + what (role) + where (scope) | No matching row means 403 |
+| Control vs data plane | Owner covers managing resources (create, configure, delete) but NOT using data inside them (upload docs, query, call models) | Data access needs explicit data roles, even for the owner |
+| Why Day 2 worked | API keys bypass RBAC entirely; a key is a shared master password | Moving to Entra means each identity gets only the access it needs, auditable and revocable per identity |
+| DefaultAzureCredential | Same code uses my az login identity on my Mac and the managed identity on App Service | Both identities need matching roles, or it works locally and fails in Azure (or vice versa) |
+| Least privilege split | App gets Search Index Data Contributor but not Search Service Contributor | A compromised app can't drop or redefine the index; schema changes are a deliberate admin action |
+| Scope choice | Assigned at resource level, not resource group | Roles inherit downward; resource scope avoids granting access to future resources in the group |
+| Propagation | New assignments take 5 to 10 minutes | Wait before debugging a fresh 403 |
+
+
 
 ## Interview Talking Points (fill as they emerge)
 
