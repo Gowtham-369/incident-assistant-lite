@@ -28,6 +28,10 @@ namespace IncidentAssistant.Api.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.PrimitiveCollection<string>("AllowedGroups")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("Category")
                         .HasColumnType("nvarchar(max)");
 
@@ -38,11 +42,26 @@ namespace IncidentAssistant.Api.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.PrimitiveCollection<string>("ErrorSignatures")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("ResolutionNotes")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTime?>("ResolvedAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<string>("RootCause")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("Service")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)")
+                        .HasDefaultValue("unknown");
 
                     b.Property<string>("Severity")
                         .IsRequired()
@@ -61,15 +80,20 @@ namespace IncidentAssistant.Api.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Service");
+
                     b.ToTable("Incidents");
 
                     b.HasData(
                         new
                         {
                             Id = new Guid("11111111-1111-1111-1111-111111111111"),
+                            AllowedGroups = "[\"oncall-all\"]",
                             Category = "Performance",
                             CreatedAt = new DateTime(2026, 9, 1, 14, 30, 0, 0, DateTimeKind.Utc),
                             Description = "p99 latency jumped from 200ms to 4s after the 14:00 deploy. Errors in logs mention connection pool exhaustion.",
+                            ErrorSignatures = "[]",
+                            Service = "checkout-api",
                             Severity = "High",
                             Status = "Open",
                             Title = "API latency spike on checkout service"
@@ -77,9 +101,12 @@ namespace IncidentAssistant.Api.Migrations
                         new
                         {
                             Id = new Guid("22222222-2222-2222-2222-222222222222"),
+                            AllowedGroups = "[\"oncall-all\"]",
                             Category = "Email",
                             CreatedAt = new DateTime(2026, 9, 3, 9, 15, 0, 0, DateTimeKind.Utc),
                             Description = "Password reset emails not being delivered. SMTP relay returning 451 errors intermittently.",
+                            ErrorSignatures = "[]",
+                            Service = "notification-service",
                             Severity = "Medium",
                             Status = "InProgress",
                             Title = "Users unable to reset passwords"
@@ -87,11 +114,14 @@ namespace IncidentAssistant.Api.Migrations
                         new
                         {
                             Id = new Guid("33333333-3333-3333-3333-333333333333"),
+                            AllowedGroups = "[\"oncall-all\"]",
                             Category = "Data",
                             CreatedAt = new DateTime(2026, 8, 28, 2, 0, 0, 0, DateTimeKind.Utc),
                             Description = "Data warehouse sync failed at step 3 with a timeout. Downstream dashboards showing stale data.",
+                            ErrorSignatures = "[]",
                             ResolutionNotes = "Increased timeout and added retry; root cause was a long-running lock from a manual query.",
                             ResolvedAt = new DateTime(2026, 8, 28, 8, 45, 0, 0, DateTimeKind.Utc),
+                            Service = "data-pipeline",
                             Severity = "Low",
                             Status = "Resolved",
                             Title = "Nightly ETL job failed"

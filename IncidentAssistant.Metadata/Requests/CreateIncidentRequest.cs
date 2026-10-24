@@ -6,4 +6,5 @@ public record CreateIncidentRequest(
     [Required, MaxLength(200)] string Title,
     [Required, MaxLength(4000)] string Description,
     Severity Severity,
-    [MaxLength(100)] string? Category);
+    [MaxLength(100)] string? Category,
+    string? Service = null, IReadOnlyList<string>? ErrorSignatures = null);

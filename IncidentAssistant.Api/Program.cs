@@ -80,4 +80,22 @@ if(app.Environment.IsDevelopment())
 
 app.MapControllers();
 
+if(app.Configuration.GetValue<bool>("Seeding:Enabled"))
+{
+    try
+    {
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+        var path = Path.Combine(app.Environment.ContentRootPath, "Seed", "incidents.json");
+        await IncidentSeeder.SeedAsync(db, path, logger);
+    }
+    catch (Exception ex)
+    {
+        var logger = app.Services.GetRequiredService<ILogger<Program>>();
+        logger.LogWarning(ex, "Incident seeding failed; the API will start without it");
+    }
+    
+}
+
 app.Run();

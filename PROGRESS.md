@@ -453,7 +453,7 @@ The expiry. All four pass → the token's claims become the request's User ident
 
 The elegant part worth saying in an interview: the API never sees credentials and holds no secrets. It's a pure verifier — users authenticate with Entra ID, and the API just checks the cryptographic receipt.
 
-Block 7 - Deploying App in App Service and Connecting to Azure SQL Database
+#### Block 7 - Deploying App in App Service and Connecting to Azure SQL Database
 
 - **sqlcmd is a client, not part of the engine** — `-S` points it at any
   reachable SQL Server; used the local container's sqlcmd to talk to Azure SQL.
@@ -470,7 +470,7 @@ Block 7 - Deploying App in App Service and Connecting to Azure SQL Database
   rejected; ~20s = timeout/unreachable/waking. Reading the clock narrows the
   suspect list before reading the message.
 
-Block 8 - APIM
+#### Block 8 - APIM
 
 - **Ocp-Apim-Trace: true** + the Ocp-Apim-Trace-Location response header = full
   gateway execution trace showing every policy step and its verdict. APIM's
@@ -619,7 +619,10 @@ reporting the logic bug, not being pedantic.
 
 ## Day 3A
 
-#### Step1 Learnings: App registration vs managed identity
+### Step 1 — Finalized architecture design, AI Search resource creation and RBAC/Role assignments
+- [x] Done
+
+#### Learnings: App registration vs managed identity
 | Topic | What I learned | Takeaway |
 | --- | --- | --- |
 | Direction of trust | App registration (`incident-api`, Day 1) controls **inbound** access: callers get a token with audience `api://<client-id>` and my API validates it. Managed identity (Day 3) is **outbound**: my API proves who it is when calling Azure AI Search and Foundry | One identity answers "who may call me", the other answers "who am I when I call others" |
@@ -631,7 +634,7 @@ reporting the logic bug, not being pedantic.
 | IDs | A managed identity also has a client ID and an object (principal) ID; role assignments target the object ID | Don't confuse its client ID with the app registration's client ID |
 | Why not reuse the app registration | Possible with a client secret + `ClientSecretCredential`, the older pattern | Interview line: "App registrations for OAuth between users and my API; managed identity for service-to-service calls inside Azure, so there are no stored credentials" |
 
-Azure role assignments (RBAC)
+#### Learnings: Azure role assignments (RBAC)
 | Topic | What I learned | Takeaway |
 | --- | --- | --- |
 | Anatomy | A role assignment = who (principal) + what (role) + where (scope) | No matching row means 403 |
@@ -642,7 +645,45 @@ Azure role assignments (RBAC)
 | Scope choice | Assigned at resource level, not resource group | Roles inherit downward; resource scope avoids granting access to future resources in the group |
 | Propagation | New assignments take 5 to 10 minutes | Wait before debugging a fresh 403 |
 
+### Step 2 — Schema changes, seed data, and local dev loop
+- [x] Done
+- **Schema:** added Service (indexed, default "unknown"), RootCause, ErrorSignatures and AllowedGroups to Incident. The two lists are EF Core primitive collections stored as JSON arrays in nvarchar(max) columns
+- **Migration:** AddRagFields; hand-fixed the generated defaults for existing rows to valid JSON ("[]" and ["oncall-all"]); applied to local sql2025 only
+- **Seed:** 37 synthetic resolved incidents in Seed/incidents.json (7 to 8 per service), loaded by an idempotent startup seeder behind a Seeding:Enabled flag and wrapped in try/catch
+- **Seed design:** near-duplicate pairs with the same symptoms but different root causes (checkout latency x3, payments 401 x2, login failures x2, password reset email x2, ETL timeout vs Day 1 incident 3333); ...1021 restricted to security-oncall for the trimming test; ...1034 carries a planted prompt injection for the Day 3B test
+- **DTOs:** IncidentDto exposes Service, RootCause, ErrorSignatures; create/update requests take them as optional trailing parameters so existing clients keep working; AllowedGroups is never exposed
+- **SPA:** added `npm run dev:local` (Vite mode localapi) that proxies /api to the local API; `npm run dev` still targets APIM; defaulted VITE_API_BASE and VITE_APIM_KEY to "" in apiClient.ts
+- **Verified:** seeder logged added 37, then added 0 / skipped 37 on rerun; SQL counts per service matched; SPA showed 40 incidents locally; create and delete worked through the proxy; direct GET to localhost:5173/api/incidents without a token returned 401 from the local API
+- **Demo hook for later:** triaging Day 1 incident 1111 should cite ...1004 (pool leak) not ...1005 (slow dependency); triaging 2222 should cite ...1022 (SMTP throttling) not ...1023 (DKIM)
+- **Time actually taken:*120 min*
 
+#### Learnings: schema, migrations and seeding
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Primitive collections | EF Core maps List<string> to a JSON array in a single nvarchar(max) column, no join table | Good fit for simple tag lists like error signatures and access groups |
+| Migration defaults | New non-null columns get a default for existing rows, and EF chose "" which is not valid JSON; reading that row later would throw | Always read a generated migration before applying it |
+| Designer file | `<migration>.Designer.cs` carries [Migration("id")] so EF can discover and order the migration, plus BuildTargetModel (the model as of that migration); ModelSnapshot holds the current model that the next migration is diffed against | Commit all three files together, never hand-edit Designer or snapshot, use `migrations remove` instead of deleting files |
+| Migrations vs seeding | `dotnet ef database update` changes structure (columns, defaults, indexes, HasData rows) and records it in __EFMigrationsHistory; it does not load bulk data | Schema through migrations, demo data through the seeder |
+| Which database | EF tools run in the Development environment by default, so `database update` targets the local connection string | Azure SQL gets an idempotent script (`migrations script --idempotent`) run deliberately in the portal Query editor |
+| HasData vs seeder | HasData bakes every row into migrations; a runtime seeder reads a file and keeps migrations small | HasData for small reference data, a seeder for bulk demo data |
+| Idempotent seeding | Insert only IDs not already present, so restarts are safe | Startup tasks must be safe to run more than once |
+| Deterministic IDs | Readable fixed GUIDs mean local and Azure hold identical IDs | The golden eval set can reference incident IDs that are stable across environments |
+| Startup resilience | Seeding wrapped in try/catch so a cold serverless database cannot stop the API from starting | Non-essential startup work should never be a single point of failure |
+| Publish includes | CopyToPublishDirectory ships Seed/incidents.json to App Service | Opposite of the Day 1 lesson: there publish included a file I didn't want, here I told it to include one I do |
+| Near-duplicate seed data | Pairs with the same symptoms but different causes force retrieval to separate them | Easy test data hides retrieval weaknesses |
+| Security fields in DTOs | AllowedGroups stays server side only | Clients should never read or set their own access scope |
+
+#### Learnings: running the SPA against the local API
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Vite modes | `vite --mode localapi` loads `.env.localapi` on top of `.env`; the mode name must match the file suffix exactly | Switch environments with a script, not by editing .env by hand |
+| Base plus path | apiClient builds `${API_BASE}${path}` and every path starts with /api/; an empty base gives a relative URL the proxy matches, an APIM base gives an absolute URL the proxy never sees | Keep the gateway suffix in the env value and the route in code |
+| Undefined env values | A missing VITE_ var becomes the string "undefined" inside a template literal | Default env reads with `?? ""` |
+| Dev proxy vs CORS | The proxy makes browser calls same-origin, so local CORS is not needed; production CORS stays in APIM | Avoid adding CORS to the API just for dev, which would also risk duplicate Access-Control-Allow-Origin headers behind APIM |
+| Env var exposure | Only VITE_ prefixed vars are inlined into the browser bundle; LOCAL_API_URL stays in vite.config.ts | Leave anything the browser doesn't need unprefixed |
+| Same token, two backends | Local and deployed API share the same Entra audience, so one MSAL token works for both | Auth is tied to the app registration, not to the hosting URL |
+| Proving the proxy | Opening localhost:5173/api/incidents without signing in returned 401 from the API; seeing index.html would have meant the proxy was off | A quick negative test confirms routing before debugging auth |
+| UseHttpsRedirection without HTTPS | The middleware finds the HTTPS port from HttpsRedirectionOptions, ASPNETCORE_HTTPS_PORT, or Kestrel's bound https:// address; under the http profile none exist, so it logs "Failed to determine the https port for redirect" and passes the request through | `dotnet run` uses the first launch profile; the proxy target must match the profile, otherwise a 307 to the https port sends the browser cross-origin and CORS blocks it |
 
 ## Interview Talking Points (fill as they emerge)
 

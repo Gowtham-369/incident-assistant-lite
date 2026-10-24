@@ -8,8 +8,8 @@ import type {
   TriageResult,
 } from "../types/incidents";
 
-const API_BASE = import.meta.env.VITE_API_BASE;
-const APIM_KEY = import.meta.env.VITE_APIM_KEY;
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+const APIM_KEY = import.meta.env.VITE_APIM_KEY ?? "";
 
 async function getToken(
   instance: IPublicClientApplication,

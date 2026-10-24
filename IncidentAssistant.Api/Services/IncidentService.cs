@@ -39,6 +39,8 @@ public class IncidentService(AppDbContext db) : IIncidentService
             Description = request.Description,
             Severity = request.Severity,
             Category = request.Category,
+            Service = request.Service ?? "unknown",
+            ErrorSignatures = request.ErrorSignatures?.ToList() ?? [],
             Status = IncidentStatus.Open,
             CreatedAt = DateTime.UtcNow
         };
@@ -57,6 +59,9 @@ public class IncidentService(AppDbContext db) : IIncidentService
         incident.Severity = request.Severity;
         incident.Category = request.Category;
         incident.ResolutionNotes = request.ResolutionNotes;
+        incident.Service = request.Service ?? incident.Service;
+        incident.RootCause = request.RootCause ?? incident.RootCause;
+        incident.ErrorSignatures = request.ErrorSignatures?.ToList() ?? [];
 
         if (request.Status == IncidentStatus.Resolved && incident.Status != IncidentStatus.Resolved)
             incident.ResolvedAt = DateTime.UtcNow;
@@ -74,5 +79,6 @@ public class IncidentService(AppDbContext db) : IIncidentService
 
     private static IncidentDto ToDto(Incident i) =>
         new(i.Id, i.Title, i.Description, i.Severity, i.Status,
-            i.Category, i.CreatedAt, i.ResolvedAt, i.ResolutionNotes);
+            i.Category, i.CreatedAt, i.ResolvedAt, i.ResolutionNotes,
+            i.Service, i.RootCause, i.ErrorSignatures);
 }

@@ -14,4 +14,8 @@ public class Incident
     public DateTime CreatedAt { get; set; }
     public DateTime? ResolvedAt { get; set; }
     public string? ResolutionNotes { get; set; }
+    public string Service { get; set; } = "unknown";
+    public string? RootCause { get; set; }
+    public List<string> ErrorSignatures { get; set; } = [];
+    public List<string> AllowedGroups { get; set; } = ["oncall-all"];
 }
