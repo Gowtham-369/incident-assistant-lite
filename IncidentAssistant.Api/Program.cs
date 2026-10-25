@@ -8,6 +8,13 @@ using Scalar.AspNetCore;
 using OpenAI.Responses;
 using System.ClientModel;
 using OpenAI;
+using Azure.Core;
+using Azure.Identity;
+using IncidentAssistant.Api.Rag;
+using Microsoft.Extensions.Options;
+using Azure.Search.Documents.Indexes;
+using System.ClientModel.Primitives;
+using OpenAI.Embeddings;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +53,38 @@ builder.Services.AddSingleton(sp =>
 });
 
 builder.Services.AddScoped<ITriageService, TriageService>();
+
+// One credential for every Azure call: az login locally, managed identity on App Service
+builder.Services.AddSingleton<TokenCredential>(new DefaultAzureCredential());
+
+builder.Services.AddOptions<AzureSearchOptions>()
+    .Bind(builder.Configuration.GetSection(AzureSearchOptions.Section))
+    .Validate(o => !string.IsNullOrWhiteSpace(o.Endpoint), "AzureSearch:Endpoint is required")
+    .ValidateOnStart();
+
+builder.Services.AddSingleton(sp =>
+{
+    var o = sp.GetRequiredService<IOptions<AzureSearchOptions>>().Value;
+    return new SearchIndexClient(
+        new Uri(o.Endpoint),
+        sp.GetRequiredService<TokenCredential>(),
+        SearchSerialization.CreateClientOptions());
+});
+
+builder.Services.AddSingleton(sp =>
+{
+    var cfg = sp.GetRequiredService<IConfiguration>();
+    var policy = new BearerTokenPolicy(
+        sp.GetRequiredService<TokenCredential>(), "https://ai.azure.com/.default");
+
+    return new EmbeddingClient(
+        cfg["AzureOpenAI:EmbeddingDeployment"]!,
+        policy,
+        new OpenAIClientOptions { Endpoint = new Uri(cfg["AzureOpenAI:Endpoint"]!) });
+});
+
+builder.Services.AddSingleton<EmbeddingService>();
+builder.Services.AddScoped<IncidentIndexer>();
 
 var app = builder.Build();
 
@@ -96,6 +135,14 @@ if(app.Configuration.GetValue<bool>("Seeding:Enabled"))
         logger.LogWarning(ex, "Incident seeding failed; the API will start without it");
     }
     
+}
+
+// Admin action: rebuild both indexes and exit. Never exposed over HTTP.
+if (app.Configuration.GetValue<bool>("Reindex"))
+{
+    using var scope = app.Services.CreateScope();
+    await scope.ServiceProvider.GetRequiredService<IncidentIndexer>().RebuildAllAsync(CancellationToken.None);
+    return;
 }
 
 app.Run();

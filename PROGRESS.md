@@ -685,6 +685,124 @@ reporting the logic bug, not being pedantic.
 | Proving the proxy | Opening localhost:5173/api/incidents without signing in returned 401 from the API; seeing index.html would have meant the proxy was off | A quick negative test confirms routing before debugging auth |
 | UseHttpsRedirection without HTTPS | The middleware finds the HTTPS port from HttpsRedirectionOptions, ASPNETCORE_HTTPS_PORT, or Kestrel's bound https:// address; under the http profile none exist, so it logs "Failed to determine the https port for redirect" and passes the request through | `dotnet run` uses the first launch profile; the proxy target must match the profile, otherwise a 307 to the https port sends the browser cross-origin and CORS blocks it |
 
+### Step 3: Chunking, embeddings, index build
+- [x] Done
+- **Built:** `Rag/` folder with six files (lineage below), plus DI wiring and a `--Reindex=true` admin switch in Program.cs
+- **Packages:** Azure.Search.Documents 12.0.0, Azure.Identity 1.21.0, OpenAI 2.14.0 (direct reference)
+- **Indexes:** incidents-a = 39 whole-incident chunks; incidents-b = 78 section chunks (37 seeded + Day 1 incidents 1111 and 3333, both resolved; 2222 is InProgress so not indexed)
+- **Run with:** `dotnet run --launch-profile http -- --Reindex=true` (rebuilds both indexes, then exits without starting the web server)
+- **Auth:** `az login` locally; DefaultAzureCredential picks it up for both Search and embeddings. No keys in config
+- **Verified:** contentVector is Collection(Edm.Single) with 1536 dims; Search explorer `SMTP 451` returned ...1022 symptoms first; `service eq 'checkout-api'` returned 18 on incidents-b (9 incidents x 2 chunks); allowedGroups not returned in results
+- **Surprises / gotchas:**
+  - FieldBuilder created contentVector as a ComplexType (children length, isEmpty, span, the public properties of ReadOnlyMemory<float>). The upload failed with a 400 about StartArray vs StartObject after all embeddings were already generated. Fixed with float[] and a schema guard that fails before index creation
+  - `dotnet add package` pulled Azure.Search.Documents 12.0.0, a new major; changelog showed no breaking changes for the APIs used
+  - NuGet flagged vulnerable transitive packages (Microsoft.OpenApi 2.0.0, System.Security.Cryptography.Pkcs 10.0.10); fixed in a separate commit
+  - Predicted 38 incidents and 16 checkout chunks, got 39 and 18, because 1111 had been resolved during Day 2 testing
+- **Found for Step 4:** 1111 is resolved and indexed, so retrieval for an existing incident must exclude its own ID or it matches itself first
+- **Time actually taken:*150 min*
+
+#### Rag Flow: How the Rag/ files work together
+
+```mermaid
+flowchart TD
+    CLI["dotnet run -- --Reindex=true"] --> PROG["Program.cs<br/>reads Reindex from command line config"]
+
+    subgraph DI["Startup: Program.cs DI wiring"]
+        CRED["TokenCredential<br/>DefaultAzureCredential, az login locally"]
+        OPTS["RagOptions.cs: AzureSearchOptions<br/>endpoint + index names, validated on start"]
+        SER["RagOptions.cs: SearchSerialization<br/>one camelCase serializer"]
+        SIC["SearchIndexClient<br/>endpoint + credential + serializer"]
+        EMBC["EmbeddingClient<br/>BearerTokenPolicy, ai.azure.com scope"]
+        CRED --> SIC
+        OPTS --> SIC
+        SER --> SIC
+        CRED --> EMBC
+    end
+
+    PROG --> DI
+    PROG --> IDX["IncidentIndexer.cs<br/>RebuildAllAsync"]
+
+    IDX --> DB["AppDbContext<br/>load Resolved incidents from SQL"]
+    DB --> LOOP{"For each strategy<br/>A: incidents-a, B: incidents-b"}
+
+    LOOP --> DEL["Delete existing index<br/>404 ignored on first run"]
+    DEL --> DEF["IncidentIndexDefinition.cs<br/>FieldBuilder over IncidentChunk<br/>+ HNSW cosine + semantic config"]
+    CHUNKMODEL["IncidentChunk.cs<br/>document class, attributes define schema"] --> DEF
+    SER --> DEF
+    DEF --> GUARD{"Schema guard<br/>contentVector is Collection Edm.Single, 1536 dims?"}
+    GUARD -- no --> FAIL["Throw before any index is created<br/>or any tokens are spent"]
+    GUARD -- yes --> CREATE["SearchIndexClient.CreateIndexAsync"]
+
+    CREATE --> CHK["IncidentChunker.cs<br/>Incident to IncidentChunk list<br/>header + symptoms / resolution / full"]
+    CHK --> EMB["EmbeddingService.cs<br/>batches of 16, ordered by Index"]
+    EMBC --> EMB
+    EMB --> ASSIGN["Attach float[] vector + embeddingModel tag<br/>to each chunk"]
+    ASSIGN --> UP["SearchClient.MergeOrUploadDocumentsAsync<br/>deterministic chunkId, so idempotent"]
+    UP --> LOG["Log uploaded and failed counts"]
+    LOG --> LOOP
+    LOOP -- both done --> EXIT["return: exit without app.Run"]
+```
+
+#### File lineage: what each file does and why it exists
+
+| Order | File | What it does | Why it's necessary |
+| --- | --- | --- | --- |
+| 1 | `Rag/RagOptions.cs` | `AzureSearchOptions` (endpoint, `incidents-b` default, `incidents-a` comparison), `ChunkingStrategy` enum, `SearchSerialization` with one camelCase `JsonObjectSerializer` | Keeps config typed and validated at startup; one serializer guarantees the schema and the uploads use the same field names |
+| 2 | `Rag/IncidentChunk.cs` | The Search document class; attributes (`SimpleField`, `SearchableField`, `VectorSearchField`, `IsHidden`) define each field's behavior | Single source of truth: the same class is the index schema and the upload payload, so they can't drift apart |
+| 3 | `Rag/IncidentIndexDefinition.cs` | Builds the `SearchIndex`: fields from FieldBuilder, HNSW cosine algorithm, vector profile, semantic configuration, plus the contentVector guard | Index structure lives in code, so it's reviewable, versioned and reproducible; the guard turns a silent schema bug into a clear startup error |
+| 4 | `Rag/IncidentChunker.cs` | Pure function: Incident to chunks. Strategy A = one `full` chunk; strategy B = `symptoms` + `resolution`. Adds the context header and deterministic `chunkId` | Chunking is the biggest retrieval quality lever; keeping it pure C# with no Azure calls makes it easy to unit test and compare |
+| 5 | `Rag/EmbeddingService.cs` | Wraps `EmbeddingClient`: batches of 16, reorders by returned index, exposes `ModelTag` | Isolates the model call, keeps vectors aligned with their texts, and records which model produced each vector |
+| 6 | `Rag/IncidentIndexer.cs` | Orchestrates: load resolved incidents, then per strategy delete, create, chunk, embed, upload, log | The one place the pipeline runs end to end; Day 3B's outbox worker will reuse the same chunk, embed and upload path for single incidents |
+| wiring | `Program.cs` | Registers `TokenCredential`, options, `SearchIndexClient`, `EmbeddingClient`, `EmbeddingService`, `IncidentIndexer`; runs the rebuild and exits when `Reindex=true` | Makes the rebuild an admin action from my machine, not an HTTP endpoint |
+
+Dependency direction: `IncidentIndexer` depends on everything else; `IncidentChunker`, `IncidentChunk` and `RagOptions` depend on nothing in Azure. That split keeps the testable logic separate from the cloud calls.
+
+#### Learnings: identity, packages and setup
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| az login + DefaultAzureCredential | One `az login` gives DefaultAzureCredential a local identity; on App Service the same code uses the managed identity | Same code, different identity per environment; both need the same data plane roles |
+| Azure.Identity vs Microsoft.Identity.Web | Microsoft.Identity.Web validates inbound JWTs for the app registration; Azure.Identity provides TokenCredential for outbound Azure SDK calls | Inbound auth library vs outbound credential library, the same split as app registration vs managed identity |
+| One shared credential | A single TokenCredential singleton serves both SearchIndexClient and the embedding BearerTokenPolicy | One identity per app process, registered once |
+| BearerTokenPolicy scope | Foundry `/openai/v1` with Entra ID needs a token for `https://ai.azure.com/.default`; the policy-based constructor is marked experimental (OPENAI001) | Each Azure service has its own token audience; experimental APIs need an explicit suppression |
+| Direct vs transitive references | OpenAI and Azure.Identity can arrive through other packages, but code that uses a package directly should reference it directly | Don't depend on another package's internal dependencies |
+| Transitive vulnerabilities | NU1902/NU1903 flagged Microsoft.OpenApi 2.0.0 and Pkcs 10.0.10; `dotnet nuget why` showed which parent pulled them in; updated or pinned to patched versions | Run `dotnet list package --vulnerable --include-transitive` regularly; comment every pin with the advisory and when to remove it; keep security fixes in their own commit |
+| Major version bumps | `dotnet add package` pulled Azure.Search.Documents 12.0.0; its changelog listed only obsolete enrichment skills | Read the changelog before trusting code written against an older major |
+
+#### Learnings: chunking and the document model
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Section chunking | Incidents have natural boundaries (symptoms vs root cause and fix); fixed-size token windows would split or mix them | Chunk on the document's own structure first; token windows are for long unstructured text |
+| Two strategies, two indexes | A (whole incident) and B (sections) are indexed separately so the eval can compare them on the same queries | Make design choices switchable so they can be measured instead of argued |
+| Context header | Every chunk repeats service, category, severity and title, so a chunk retrieved alone still says what it belongs to | Self-contained chunks help both BM25 and embeddings |
+| GUIDs out of text | Raw IDs add tokens with no meaning; the ID lives in the filterable incidentId field instead | Keep identifiers in fields, not in searchable content |
+| Skipping empty sections | Strategy B skips the resolution chunk when root cause and notes are both empty | Never index empty or boilerplate-only chunks; they match everything weakly |
+| Field attributes | SimpleField = exact match for filter, sort, facet; SearchableField = BM25 tokens; EnMicrosoft analyzer adds English stemming; IsHidden = filterable but never returned | Schema choices decide what can be searched, filtered, or leaked |
+| Hidden security field | allowedGroups can drive security trimming without ever appearing in results | Access control data should be usable by the engine but invisible to callers |
+| Shared serializer | FieldBuilder and the upload client must use the same naming policy (camelCase), or the schema says chunkId while uploads send ChunkId | One serializer instance for schema and documents |
+
+#### Learnings: vectors, embeddings and the index
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| HNSW + cosine | HNSW is an approximate nearest neighbor graph, fast and almost always finds the true neighbors; cosine is the similarity OpenAI embeddings are designed for | Approximate search is the default; exhaustive KNN is for small sets or eval checks |
+| Semantic configuration | Declares title, content and keyword fields for the semantic ranker; it costs nothing until a query asks for semantic ranking | Configure capability in the schema, pay only when a query uses it |
+| Batching embeddings | 16 texts per call, results reordered by their returned Index | Fewer round trips, and each vector stays aligned with its text |
+| Embedding model tag | Every chunk stores `text-embedding-3-small@1536` | A model change means a full re-embed; the tag shows which vectors came from which model |
+| Vector field type bug | FieldBuilder mapped ReadOnlyMemory<float> to a ComplexType (length, isEmpty, span); the server then rejected the array with a 400 about StartArray vs StartObject; float[] maps to Collection(Edm.Single) | When an error says the server expected a different JSON shape, inspect the generated schema, not the payload |
+| Schema guard | A check after FieldBuilder throws if contentVector isn't Collection(Edm.Single) with 1536 dimensions | Validate critical schema before creating the index, so a wrong type fails before any tokens are spent |
+| Deterministic chunk IDs | `{guid:N}_{section}` makes MergeOrUpload idempotent | Retries and reruns overwrite instead of duplicating; the Day 3B outbox depends on this |
+| Partial upload failures | MergeOrUploadDocumentsAsync can succeed overall while individual documents fail; each result's Succeeded flag must be checked | Never treat a 200 from a batch API as "everything worked" |
+| Free tier fit | About 117 vectors at roughly 6 KB each is under 1 MB of the 25 MB vector quota | Size the tier from the vector count times dimensions times 4 bytes |
+
+#### Learnings: operations and verification
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Admin operations | Index rebuild is a command line switch (`-- --Reindex=true`) read through configuration, not an HTTP endpoint; the `--` separates dotnet run options from app arguments | Don't expose destructive operations as API surface |
+| Least privilege in practice | Rebuild needs Search Service Contributor, which only my user has; the app's managed identity could not recreate the index even if the code ran in Azure | Role design and code design should enforce the same boundary |
+| Rebuild vs versioning | Free tier (3 indexes) forces delete and recreate; production would build v2 next to v1 and switch config or an index alias | Zero-downtime reindexing needs index versioning or aliases |
+| Portal verification | Search explorer runs keyword queries with my identity; the Fields tab shows the real schema; vector and hybrid queries need code because the portal can't embed query text without extra setup | Use the portal to verify schema and keyword behavior, code for vector behavior |
+| Self-match in similarity search | 1111 is resolved and indexed, so "find similar" for 1111 would return itself first | Every similarity query must exclude the query incident's own ID (Step 4) |
+| Check state before predicting | Predicted 38 and 16, got 39 and 18 because 1111 had been resolved earlier | Query the current data before writing expected counts into a test |
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
