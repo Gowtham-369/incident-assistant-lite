@@ -803,6 +803,123 @@ Dependency direction: `IncidentIndexer` depends on everything else; `IncidentChu
 | Self-match in similarity search | 1111 is resolved and indexed, so "find similar" for 1111 would return itself first | Every similarity query must exclude the query incident's own ID (Step 4) |
 | Check state before predicting | Predicted 38 and 16, got 39 and 18 because 1111 had been resolved earlier | Query the current data before writing expected counts into a test |
 
+### Step 4: Retrieval
+- [x] Done
+- **Built:** `Rag/RetrievalModels.cs`, `Rag/QueryText.cs`, `Rag/IncidentRetriever.cs`, `RetrievalOptions` in `Rag/RagOptions.cs`, `SimilarIncidentDto` and `SimilarIncidentsResponse` in the Metadata project, and `GET /api/incidents/{id}/similar` in IncidentsController
+- **Endpoint parameters:** `mode` (Keyword, Vector, Hybrid, HybridSemantic; default HybridSemantic), `strategy` (Sections, WholeIncident; default Sections), `top` (1 to 10; default 5)
+- **Filters on every query:** allowedGroups (fixed `oncall-all` until Day 3B reads groups from the token), `service eq <incident service>` with a rerun across all services when evidence is weak, and `incidentId ne <this incident>`
+- **Config (`Retrieval` section):** ChunkCandidates 20, VectorK 50, VectorFilterMode preFilter, MinRerankerScore 1.5 (provisional, too low per Test D), DefaultTop 5
+- **Fallbacks:** semantic ranker failure retries as plain Hybrid (response reports requested vs executed mode); weak or empty in-service results rerun without the service filter (`fallbackToAllServices: true`)
+- **Semantic ranker:** enabled on the Free tier; every HybridSemantic call executed as HybridSemantic
+- **Fix during testing:** CrossService was true for every result when the query incident's service was `unknown`; now false in that case
+- **Test evidence:** saved as JSON under `test-results/` (Tests A to D)
+
+#### Test results
+| Test | Setup | Result |
+| --- | --- | --- |
+| A: four modes on 1111 (checkout latency, connection pool exhaustion) | incidents-b, service filter checkout-api, 16 chunk hits (8 incidents) | Keyword 1004, 1005, 1008 (58.0 vs 33.7) / Vector 1004, 1005, 1008 (0.86 vs 0.82) / Hybrid 1004, 1005, 1008 / HybridSemantic 1004, 1005, 1007 (reranker 2.80 vs 2.58, all top 3 matched on resolution chunks) |
+| B: 2222 (password reset, SMTP 451) | incidents-b, service filter notification-service | Keyword 1022 then 1023 (60.8 vs 30.3, 15 chunk hits) / Vector 1022 then 1023 (0.77 vs 0.74, 16 chunk hits) |
+| C: chunking strategies, 1111 HybridSemantic | incidents-a vs incidents-b | Same top 5 in the same order (1004, 1005, 1007, 1009, 1006); B scored 1004 at 2.80 vs A at 2.70 |
+| D: security trimming, new incident about failed logins from many IPs (service unknown, so no service filter) | `oncall-all` only, then `oncall-all` + `security-oncall` | 1021 never appeared with `oncall-all`; top result was 1017 at 1.92 and 1111 (checkout latency) appeared at 1.61. With `security-oncall`, 1021 ranked first at 3.34 |
+| Self-exclusion | Every test | The queried incident never appeared in its own results |
+
+- **Deferred to Day 3B:** three disagreement queries (paraphrase for 1004, bare code `AADSTS50011` for 1017, duplicate shipping emails for 1026) as golden set entries; CallerGroups from the token; MinRerankerScore chosen from the eval; adding the `/similar` operation to APIM at deploy time
+- **Time actually taken:**
+
+#### Request flow: GET /api/incidents/:id/similar
+
+```mermaid
+flowchart TD
+    CLIENT["Postman or SPA<br/>GET /api/incidents/:id/similar?mode=&strategy=&top="] --> AUTH["Microsoft.Identity.Web<br/>validates Bearer token, audience api://incident-api"]
+    AUTH --> CTRL["IncidentsController.GetSimilar<br/>binds mode, strategy, top; clamps top 1 to 10"]
+
+    CTRL --> SVC["IIncidentService.GetByIdAsync<br/>AppDbContext loads the incident"]
+    SVC --> NF{"Found?"}
+    NF -- no --> R404["404 Not Found"]
+    NF -- yes --> QT["QueryText.FromIncident<br/>title + description + error signatures, max 1000 chars"]
+
+    QT --> RQ["Build RetrievalQuery<br/>text, service, exclude own id,<br/>CallerGroups oncall-all, mode, strategy, top"]
+    RQ --> RET["IncidentRetriever.RetrieveAsync"]
+
+    subgraph RETRIEVER["IncidentRetriever"]
+        IDX["Pick index from AzureSearchOptions<br/>Sections: incidents-b, WholeIncident: incidents-a"]
+        NEEDVEC{"Mode needs a vector?"}
+        EMB["EmbeddingService.EmbedAsync<br/>EmbeddingClient, BearerTokenPolicy<br/>1 call, 1536 floats"]
+        FILT["BuildFilter with SearchFilter.Create<br/>allowedGroups/any + service eq + incidentId ne"]
+        OPTS["Build SearchOptions from RetrievalOptions<br/>Size 20, Select fields, VectorizedQuery k 50 preFilter,<br/>QueryType Semantic + incidents-semantic for HybridSemantic"]
+        TXT["QueryText.ForKeywordSearch<br/>strip query operators; null for Vector mode"]
+        RUN["SearchClient.SearchAsync of IncidentChunk<br/>from SearchIndexClient, shared serializer"]
+        SEMFAIL{"HybridSemantic failed with 400?"}
+        HYB["Log warning, rerun as Hybrid<br/>ExecutedMode = Hybrid"]
+        COL["Collapse: GroupBy incidentId, keep best chunk,<br/>take top N"]
+        EV{"Service filter on and<br/>evidence weak or empty?"}
+        ALL["Rerun without service filter<br/>FallbackToAllServices = true"]
+        LOG["Log index, requested vs executed mode, service,<br/>fallback, chunk hits, incidents, top reranker"]
+
+        IDX --> NEEDVEC
+        NEEDVEC -- "Vector, Hybrid, HybridSemantic" --> EMB --> FILT
+        NEEDVEC -- Keyword --> FILT
+        FILT --> OPTS --> TXT --> RUN --> SEMFAIL
+        SEMFAIL -- yes --> HYB --> COL
+        SEMFAIL -- no --> COL
+        COL --> EV
+        EV -- yes --> ALL --> COL2["Collapse again"] --> LOG
+        EV -- no --> LOG
+    end
+
+    RET --> IDX
+    LOG --> RES["RetrievalResult<br/>requested and executed mode, index, fallback, chunk hits, incidents"]
+    RES --> MAP["Controller maps to SimilarIncidentsResponse<br/>CrossService = different service and query service not unknown"]
+    MAP --> OK["200 OK JSON"]
+```
+
+#### File lineage for a /similar request
+| Order | File | Role in the request | Why it's necessary |
+| --- | --- | --- | --- |
+| 1 | `Controllers/IncidentsController.cs` | Entry point: binds query parameters, loads the incident, builds the RetrievalQuery, maps the result to the response DTO | Keeps HTTP concerns (binding, 404, response shape) out of retrieval logic |
+| 2 | `Services/IncidentService.cs` + `AppDbContext` | Loads the incident from SQL as an IncidentDto | SQL is the system of record; retrieval starts from real incident data, not client-supplied text |
+| 3 | `Rag/QueryText.cs` | `FromIncident` builds the query from the same fields as the symptoms chunk; `ForKeywordSearch` strips query syntax operators | Aligns the query with how symptoms were indexed, and stops incident text from being parsed as search syntax |
+| 4 | `Rag/RetrievalModels.cs` | RetrievalMode, RetrievalQuery, RetrievedIncident, RetrievalResult | A typed contract between controller and retriever; requested vs executed mode makes degradation visible |
+| 5 | `Rag/RagOptions.cs` | AzureSearchOptions picks the index for the strategy; RetrievalOptions supplies candidates, k, filter mode, threshold, default top | Tuning values live in config so the eval can change them without code changes |
+| 6 | `Rag/IncidentRetriever.cs` | Embeds (when needed), builds filters and options, runs the search, falls back on semantic failure or weak evidence, collapses chunks, logs | The single place retrieval decisions are made, so the triage endpoint in Step 5 and the eval in Day 3B reuse exactly the same behavior |
+| 7 | `Rag/EmbeddingService.cs` (from Step 3) | Embeds the query text with the same deployment and dimensions as the indexed chunks | Query and document vectors must come from the same model, or similarity scores mean nothing |
+| 8 | `Rag/IncidentChunk.cs` + `Rag/IncidentIndexDefinition.cs` (from Step 3) | IncidentChunk is the deserialization type for hits; the index definition supplies the semantic configuration name | Search results map onto the same class that defined the schema |
+| 9 | `Program.cs` | Registers RetrievalOptions and IncidentRetriever (singleton) alongside the Step 3 clients | The retriever only depends on thread-safe singletons, so one instance serves all requests |
+| 10 | Metadata `SimilarIncidentDto`, `SimilarIncidentsResponse` | The response contract shared with the SPA | Keeps the wire format stable and typed for the frontend |
+
+#### Learnings: retrieval design
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Four modes, one index | Keyword, Vector, Hybrid and HybridSemantic all run against the same chunks; only the query options differ | Make the retrieval mode a parameter so it can be measured, not assumed |
+| Query built from the symptoms fields | The query uses title, description and error signatures, matching how symptoms chunks were built | Shape the query like the content it should match |
+| Query syntax injection | Incident text can contain characters the simple query parser treats as operators (`-503` would mean "not 503") | Sanitize free text before using it as search syntax, the way you'd parameterize SQL |
+| Filter injection | SearchFilter.Create quotes and escapes values inside OData filters | Never build filters by string concatenation |
+| Security trimming in the engine | `allowedGroups/any(g: search.in(...))` runs inside Search, so restricted incidents never leave the service | Enforce access at retrieval time, not by filtering results afterwards |
+| Self exclusion | `incidentId ne <id>` stops a resolved incident from matching itself | Similarity queries for an existing item must exclude it |
+| Service filter with fallback | Filter to the incident's service first for precision; rerun across all services when nothing strong comes back, for recall | Narrow first, widen only when needed, and report that you widened |
+| Prefilter vs postfilter | Prefilter applies filters before the vector search, so all k neighbors qualify; postfilter can leave fewer results | Use prefilter when filters are selective |
+| k = 50 with semantic ranking | The vector query contributes 50 candidates so the reranker has enough to reorder | Feed the reranker a wide candidate set, then return a narrow top N |
+| RRF scores | Hybrid @search.score values are tiny rank-based numbers (0.03), not similarity | Never threshold on hybrid or BM25 scores |
+| Reranker score | rerankerScore runs 0 to 4 and is comparable across queries | The only score safe to use as an evidence threshold |
+| Requested vs executed mode | A semantic failure falls back to plain hybrid, and the response says so | Degrade visibly, never silently |
+| Collapsing chunks | Search ranks chunks, users want incidents; GroupBy on incidentId keeps the best chunk per incident in rank order | Rank at chunk level, report at document level |
+| Retriever as a singleton | It depends only on thread-safe clients; the controller does the DbContext work | Keep scoped dependencies (DbContext) out of long-lived services |
+| One structured log line per retrieval | Mode, service, fallback, hits, incident count and top reranker score are logged together | Enough to tell a retrieval problem from a generation problem later |
+
+#### Learnings: what the tests showed
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Why the modes agreed | The service prefilter left only 8 candidate incidents (chunkHits 16 on B, 8 on A), and the queries shared vocabulary with their answers | Hybrid shows its value on paraphrases, bare error codes and unfiltered queries; an easy test can't separate the methods |
+| Margins, not just ranks | All modes put 1004 above 1005, but keyword's gap was large (58 vs 34) and vector's small (0.86 vs 0.82) | Methods can agree on order and still differ in confidence |
+| Reranker threshold too low | With the correct answer hidden, irrelevant incidents still scored 1.6 to 1.9 (including checkout latency for a security query); correct answers scored 2.6 to 3.3 | 1.5 would let the model answer from irrelevant incidents; choose the threshold from eval data that includes no-answer queries |
+| Reranking changed the matched section | HybridSemantic matched 1004's resolution chunk; every other mode matched symptoms | Section chunks let different query intents match different parts of one incident |
+| Reranking isn't strictly better | It widened the top gap but pushed a relevant latency incident (1009) below unrelated ones (1007, 1006) | Measure reranking across the whole top K, not just position 1 |
+| Chunking strategies on an easy query | A and B returned the same top 5; B scored slightly higher | Differences between strategies need harder queries to show up |
+| Vector search always returns something | Keyword matched 15 chunks in Test B, vector returned 16; nearest neighbors exist even when nothing is relevant | Vector search needs an evidence threshold to know when to abstain |
+| Security trimming held | 1021 never appeared without `security-oncall`, even though it scored 3.34 when visible | Filters inside the search engine enforce access with no post-processing |
+| Derived flags and missing inputs | CrossService was true everywhere when the query incident's service was unknown | Every derived flag needs a rule for missing inputs |
+| Saving raw results | JSON responses under test-results/ made the analysis possible after the fact | Keep raw evidence, not just conclusions |
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —

@@ -22,3 +22,13 @@ public static class SearchSerialization
 
     public static SearchClientOptions CreateClientOptions() => new() { Serializer = Serializer };
 }
+
+public sealed class RetrievalOptions
+{
+    public const string Section = "Retrieval";
+    public int ChunkCandidates { get; set; } = 20;
+    public int VectorK { get; set; } = 50;
+    public string VectorFilterMode { get; set; } = "preFilter";
+    public double MinRerankerScore { get; set; } = 1.5;
+    public int DefaultTop { get; set; } = 5;
+}

@@ -4,6 +4,8 @@ using IncidentAssistant.Metadata.Requests;
 using IncidentAssistant.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
+using IncidentAssistant.Api.Rag;
+using Microsoft.Extensions.Options;
 
 namespace IncidentAssistant.Api.Controllers;
 
@@ -46,5 +48,35 @@ public class IncidentsController(IIncidentService service, ITriageService triage
 
         var result = await triageService.TriageAsync(incident.Title, incident.Description, ct);
         return Ok(result);
+    }
+
+    [HttpGet("{id:guid}/similar")]
+    public async Task<ActionResult<SimilarIncidentsResponse>> GetSimilar(
+        Guid id,
+        [FromServices] IncidentRetriever retriever,
+        [FromServices] IOptions<RetrievalOptions> retrievalOptions,
+        [FromQuery] RetrievalMode mode = RetrievalMode.HybridSemantic,
+        [FromQuery] ChunkingStrategy strategy = ChunkingStrategy.Sections,
+        [FromQuery] int? top = null,
+        CancellationToken ct = default)
+    {
+        var incident = await service.GetByIdAsync(id, ct); // use your IIncidentService field name
+        if (incident is null) return NotFound();
+
+        var result = await retriever.RetrieveAsync(new RetrievalQuery(
+            Text: QueryText.FromIncident(incident),
+            Service: incident.Service,
+            ExcludeIncidentId: incident.Id,
+            CallerGroups: ["oncall-all", "security-oncall"], // Day 3B: read from the caller's token
+            Mode: mode,
+            Strategy: strategy,
+            Top: Math.Clamp(top ?? retrievalOptions.Value.DefaultTop, 1, 10)), ct);
+
+        return Ok(new SimilarIncidentsResponse(
+            incident.Id, result.RequestedMode.ToString(), result.ExecutedMode.ToString(),
+            result.IndexName, result.FallbackToAllServices, result.ChunkHits,
+            result.Incidents.Select(r => new SimilarIncidentDto(
+                Guid.Parse(r.IncidentId), r.Title, r.Service, r.MatchedSection,
+                r.Score, r.RerankerScore, r.Service != incident.Service && r.Service != incident.Service && incident.Service != "unknown", r.MatchedContent)).ToList()));
     }
 }

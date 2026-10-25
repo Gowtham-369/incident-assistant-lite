@@ -86,6 +86,11 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton<EmbeddingService>();
 builder.Services.AddScoped<IncidentIndexer>();
 
+builder.Services.AddOptions<RetrievalOptions>()
+    .Bind(builder.Configuration.GetSection(RetrievalOptions.Section));
+
+builder.Services.AddSingleton<IncidentRetriever>();
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
