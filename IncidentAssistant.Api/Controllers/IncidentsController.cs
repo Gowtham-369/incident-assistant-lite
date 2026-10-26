@@ -12,7 +12,7 @@ namespace IncidentAssistant.Api.Controllers;
 [Authorize]
 [ApiController]
 [Route("api/[controller]")]
-public class IncidentsController(IIncidentService service, ITriageService triageService) : ControllerBase
+public class IncidentsController(IIncidentService service, ITriageService triageService, IRagTriageService ragTriageService) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<IncidentDto>>> GetAll(
@@ -46,8 +46,18 @@ public class IncidentsController(IIncidentService service, ITriageService triage
         var incident = await service.GetByIdAsync(id, ct);
         if (incident is null) return NotFound();
 
-        var result = await triageService.TriageAsync(incident.Title, incident.Description, ct);
+        var result = await ragTriageService.TriageAsync(incident, ct);
         return Ok(result);
+    }
+
+    [HttpPost("{id:guid}/triage/baseline")]
+    public async Task<ActionResult<TriageResult>> TriageBaseline(Guid id, CancellationToken ct)
+    {
+        var incident = await service.GetByIdAsync(id, ct);
+        if (incident is null) return NotFound();
+
+        var result = await triageService.TriageAsync(incident.Title, incident.Description, ct);
+        return Ok(result with { Degraded = "baseline_no_retrieval", Confidence = "unassessed" });
     }
 
     [HttpGet("{id:guid}/similar")]
@@ -67,7 +77,7 @@ public class IncidentsController(IIncidentService service, ITriageService triage
             Text: QueryText.FromIncident(incident),
             Service: incident.Service,
             ExcludeIncidentId: incident.Id,
-            CallerGroups: ["oncall-all", "security-oncall"], // Day 3B: read from the caller's token
+            CallerGroups: ["oncall-all"], // Day 3B: read from the caller's token
             Mode: mode,
             Strategy: strategy,
             Top: Math.Clamp(top ?? retrievalOptions.Value.DefaultTop, 1, 10)), ct);

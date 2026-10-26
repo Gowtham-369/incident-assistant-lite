@@ -53,6 +53,7 @@ builder.Services.AddSingleton(sp =>
 });
 
 builder.Services.AddScoped<ITriageService, TriageService>();
+builder.Services.AddScoped<IRagTriageService, RagTriageService>();
 
 // One credential for every Azure call: az login locally, managed identity on App Service
 builder.Services.AddSingleton<TokenCredential>(new DefaultAzureCredential());
