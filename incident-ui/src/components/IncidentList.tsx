@@ -4,6 +4,7 @@ import type { AccountInfo } from "@azure/msal-browser";
 import { incidentsApi } from "../api/apiClient";
 import type { IncidentDto, IncidentStatus, TriageResult } from "../types/incidents";
 import { IncidentForm } from "./IncidentForm";
+import { TriagePanel } from "./TriagePanel";
 
 const STATUSES: IncidentStatus[] = ["Open", "InProgress", "Resolved"];
 
@@ -67,6 +68,13 @@ export function IncidentList({ account }: { account: AccountInfo }) {
     }
   };
 
+  const dismissTriage = (id: string) =>
+    setTriageResults((s) => {
+      const next = { ...s };
+      delete next[id];
+      return next;
+  });
+
   const applySuggestion = async (incident: IncidentDto, result: TriageResult) => {
     try {
       await incidentsApi.update(instance, account, incident.id, {
@@ -77,11 +85,7 @@ export function IncidentList({ account }: { account: AccountInfo }) {
         status: incident.status,
         resolutionNotes: incident.resolutionNotes ?? undefined,
       });
-      setTriageResults((s) => {
-        const next = { ...s };
-        delete next[incident.id];
-        return next;
-      });
+      dismissTriage(incident.id);
       refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -140,16 +144,12 @@ export function IncidentList({ account }: { account: AccountInfo }) {
                 {triageResults[i.id] && (
                   <tr>
                     <td colSpan={6} style={{ background: "#f7f7f7", padding: "0.75rem" }}>
-                      <strong>AI suggests:</strong> {triageResults[i.id].suggestedSeverity} severity,
-                      category "{triageResults[i.id].suggestedCategory}"
-                      <ul>
-                        {triageResults[i.id].troubleshootingSteps.map((step, idx) => (
-                          <li key={idx}>{step}</li>
-                        ))}
-                      </ul>
-                      <button onClick={() => applySuggestion(i, triageResults[i.id])}>
-                        Apply suggestion
-                      </button>
+                      <TriagePanel
+                        result={triageResults[i.id]}
+                        incidents={incidents ?? []}
+                        onApply={() => applySuggestion(i, triageResults[i.id])}
+                        onDismiss={() => dismissTriage(i.id)}
+                      />
                     </td>
                   </tr>
                 )}

@@ -1073,6 +1073,110 @@ The baseline endpoint (`POST .../triage/baseline`) skips everything inside the b
 | Sources vs similar incidents | `sources` lists only incidents actually cited; `similarIncidents` lists everything retrieved | Show what supports the answer separately from what was merely found |
 | Severity can differ | RAG suggested Medium for 2222, baseline High | Grounded severity reflects how similar past incidents were classified |
 
+### Step 6: React triage panel with citations
+- [x] Done
+- **Built:** `src/components/TriagePanel.tsx` (with an inner `SourceCard`), extended `TriageResult` and `IncidentDto` in `src/types/incidents.ts`, `dismissTriage` in `IncidentList.tsx`; `applySuggestion` now reuses `dismissTriage`
+- **No API client changes:** `incidentsApi.triage` already returned the whole response; the new fields arrive automatically
+- **Backward compatible:** responses without structured steps (Day 2 shape, or the baseline endpoint) still render as a plain bullet list from `troubleshootingSteps`
+- **Run locally with:** API `dotnet run --launch-profile http`, SPA `npm run dev:local` (Vite proxy to the local API)
+- **Found for Day 3B security:** `GET /api/incidents` and `GET /api/incidents/{id}` return restricted incidents (1021) to every caller; AllowedGroups is only enforced in search, so the SPA's source cards can show incidents that search would hide
+- **Time actually taken:*60 min*
+
+#### How the React app works now
+
+**1. Sign in and load.** MSAL signs the user in with a redirect. `IncidentList` mounts, calls `incidentsApi.getAll`, and stores every incident in `incidents` state. In local mode the call goes to `localhost:5173/api/incidents` and Vite forwards it to the local API; in `npm run dev` mode it goes through APIM.
+
+**2. Triage a row.** Clicking **AI Triage** sets `triageLoading[id]`, the button reads "Analyzing...", and `runTriage` calls `POST /api/incidents/{id}/triage`. The RAG call does retrieval, an embedding and a model call, so it takes noticeably longer than Day 2's single call. The response is stored in `triageResults[id]`, and a second row opens under the incident with a `TriagePanel`.
+
+**3. Read the panel.** From top to bottom:
+| Part | Shown when | What it shows |
+| --- | --- | --- |
+| Confidence badge | Always | High (green), Medium (amber), Low or Not assessed (grey) |
+| Suggestion line | Steps were generated | "Suggests High severity, category Performance" |
+| Status message | `degraded` is not `none` | Plain-language reason: no match, weak match, AI unavailable, assistant abstained, steps withheld |
+| Summary | The model returned one | One or two sentences on how the past incidents relate |
+| Likely root cause | The model identified one | The cause, in the model's words, grounded in a cited incident |
+| Steps with chips | Steps were generated | Numbered steps, each followed by chips like `[1]` pointing at the sources list |
+| Source card | A chip or a title is clicked | The cited incident's description, root cause and resolution, taken from the list already in memory |
+| Sources | At least one incident was cited | Only the incidents actually cited, with service and "match x.xx / 4" |
+| Similar incidents | Retrieval returned any | Collapsed behind "Show other similar incidents" when steps exist; open by default when they don't, since then they're the main content |
+| How this answer was produced | Diagnostics present | Retrieval mode, evidence level, top match score, number of sources given to the model, uncited steps removed |
+| Apply suggestion | `degraded` is `none` | Updates severity and category, closes the panel, refreshes the list |
+| Dismiss | Always | Closes the panel without changing anything |
+
+**4. Apply or dismiss.** Apply sends `PUT /api/incidents/{id}` with the suggested severity and category, then calls `dismissTriage` and `refresh()`. The row re-renders from fresh server data and the panel disappears because its entry in `triageResults` is gone. Dismiss only removes the entry.
+
+#### Where state lives
+| State | Owner | Lifetime | Why there |
+| --- | --- | --- | --- |
+| `incidents` | `IncidentList` | Until the next `refresh()` | Source of truth from the API; also feeds the source cards, so chips need no extra API call |
+| `triageResults[id]` | `IncidentList` | Until Apply or Dismiss | One pending AI answer per row; keyed by ID so rows don't interfere |
+| `triageLoading[id]`, `triageErrors[id]` | `IncidentList` | Per request | Per-row button and error state |
+| `openIncidentId` | `TriagePanel` | While the panel is open | Which source card is expanded; one at a time |
+| `showSimilar` | `TriagePanel` | While the panel is open | Whether the similar incidents list is expanded |
+
+Panel-local state stays inside `TriagePanel` because nothing else needs it; clicking a chip re-renders only that panel, not the whole incident list.
+
+#### Triage flow in the SPA
+
+```mermaid
+flowchart TD
+    CLICK["User clicks AI Triage on a row"] --> LOADING["triageLoading id = true<br/>button shows Analyzing"]
+    LOADING --> CLIENT["incidentsApi.triage<br/>acquireTokenSilent, Bearer header"]
+    CLIENT --> MODE{"Which npm script?"}
+    MODE -- "dev:local" --> PROXY["Vite proxy<br/>localhost:5173/api to local API"]
+    MODE -- dev --> APIM["APIM gateway<br/>CORS, subscription key, validate-jwt"]
+    PROXY --> API["POST /api/incidents/:id/triage<br/>RagTriageService"]
+    APIM --> API
+    API --> RES{"Response"}
+    RES -- error --> ERR["triageErrors id set<br/>red Triage failed row"]
+    RES -- 200 --> STORE["triageResults id = response<br/>panel row opens"]
+    STORE --> PANEL["TriagePanel renders"]
+    PANEL --> DEG{"degraded is none?"}
+    DEG -- yes --> FULL["Badge, suggestion line, summary, root cause,<br/>steps with chips, sources,<br/>similar collapsed, Apply + Dismiss"]
+    DEG -- no --> SHORT["Grey badge, status message, summary if any,<br/>similar incidents open, Dismiss only"]
+    FULL --> CHIP["Click a chip or title"]
+    SHORT --> CHIP
+    CHIP --> CARD["openIncidentId set<br/>SourceCard from incidents in memory"]
+    FULL --> APPLY["Apply suggestion"]
+    APPLY --> PUT["PUT /api/incidents/:id<br/>severity + category"]
+    PUT --> DONE["dismissTriage id, refresh<br/>row shows new values, panel closes"]
+    FULL --> DISMISS["Dismiss"]
+    SHORT --> DISMISS
+    DISMISS --> GONE["dismissTriage id<br/>panel closes, nothing saved"]
+```
+
+#### Behavior by scenario (browser tests)
+| # | Scenario | Setup | Expected | Observed |
+| --- | --- | --- | --- | --- |
+| 1 | Normal grounded answer | AI Triage on 1111 | High confidence; root cause about the retry wrapper leaking connections; 4 steps each with chip `[1]`; one source (1004) | [ ] |
+| 2 | Citation chip | Click `[1]`, click again, then click the source title | Card opens with 1004's description, root cause and resolution; second click closes it; title opens the same card | [ ] |
+| 3 | Similar incidents | Click "Show other similar incidents" | 1005, 1007 and others listed with match scores; clicking one opens its card | [ ] |
+| 4 | Diagnostics | Expand "How this answer was produced" | HybridSemantic, evidence Sufficient, top match 2.80 / 4, 5 sources given to the model | [ ] |
+| 5 | Apply | Click Apply suggestion on 1111 | Panel closes; row shows the suggested severity and category | [ ] |
+| 6 | Near duplicates | AI Triage on 2222 | Cites only 1022 (SMTP throttling); 1023 (DKIM) appears only under other similar incidents | [ ] |
+| 7 | Weak evidence | Credential stuffing test incident, MinRerankerScore 2.5 | Grey Low confidence, weak match message, similar incidents open, no Apply button | [ ] |
+| 8 | AI unavailable | DeploymentName set to a missing deployment | "AI suggestions are unavailable" message with similar incidents; no error row, no crash | [ ] |
+| 9 | Dismiss and isolation | Dismiss one panel; triage two rows | Dismissed panel closes; two open panels don't affect each other | [ ] |
+| 10 | Keyboard | Tab to a chip, press Enter | Card opens; focus stays on the chip | [ ] |
+
+Config overrides from tests 7 and 8 reverted, and the credential stuffing test incident deleted: [ ]
+
+#### Learnings: the triage panel
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Extracting a component | The triage row grew from a list and a button to ten parts, so it moved into `TriagePanel` with four props | Split a component when its rendering logic outgrows its parent, and pass in only what it needs |
+| Local vs lifted state | Which source card is open matters only to the panel, so it lives there; the triage result itself stays in `IncidentList` because Apply and Dismiss change it | Put state in the lowest component that needs it; lift it only when siblings or parents must react to it |
+| No extra fetch for citations | Source cards read from the incident list already loaded | Reuse data already in memory before adding API calls; note when that data might be stale |
+| Degraded states are UI states | Each degraded reason gets its own message, and similar incidents open by default when there are no steps | A failure path still needs a designed screen, not a generic error |
+| Hiding actions that don't apply | Apply appears only when steps were generated | Don't offer an action whose result would be meaningless |
+| Showing scores to humans | "match 2.80 / 4" instead of a bare number | A score needs its scale to mean anything to a reader |
+| Accessible chips | Chips are buttons with aria-label and aria-expanded | Clickable things should be buttons, so keyboard and screen reader users can use them |
+| Optional types for an evolving API | New TriageResult fields are optional in TypeScript, so older response shapes still type-check | Mirror additive API changes with optional client fields |
+| Trimming must cover every door | The SPA can show 1021 through the list endpoint even though search hides it | Access control enforced in one endpoint isn't access control |
+
+
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
