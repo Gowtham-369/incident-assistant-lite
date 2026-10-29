@@ -15,6 +15,7 @@ using Microsoft.Extensions.Options;
 using Azure.Search.Documents.Indexes;
 using System.ClientModel.Primitives;
 using OpenAI.Embeddings;
+using Microsoft.Data.SqlClient;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -93,6 +94,14 @@ builder.Services.AddOptions<RetrievalOptions>()
 builder.Services.AddSingleton<IncidentRetriever>();
 
 var app = builder.Build();
+
+// Log which database this process will use (server and database only, never the password)
+// Log the database EF will actually use (server and database only, never the password)
+using (var scope = app.Services.CreateScope())
+{
+    var conn = scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.GetDbConnection();
+    app.Logger.LogInformation("Database target: {Server} / {Database}", conn.DataSource, conn.Database);
+}
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

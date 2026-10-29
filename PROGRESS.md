@@ -1175,7 +1175,140 @@ Config overrides from tests 7 and 8 reverted, and the credential stuffing test i
 | Optional types for an evolving API | New TriageResult fields are optional in TypeScript, so older response shapes still type-check | Mirror additive API changes with optional client fields |
 | Trimming must cover every door | The SPA can show 1021 through the list endpoint even though search hides it | Access control enforced in one endpoint isn't access control |
 
+### Step 7: Deploy to Azure (in progress)
 
+Deploy in the order data flows: database schema, then data and index, then app settings, then app, then gateway, then SPA.
+
+```mermaid
+flowchart LR
+    S71["7.1 Migrate Azure SQL<br/>idempotent script"] --> S72["7.2 Seed Azure SQL<br/>and rebuild indexes from it"]
+    S72 --> S73["7.3 App Service settings<br/>and identity check"]
+    S73 --> S74["7.4 Publish and deploy"]
+    S74 --> S75["7.5 Verify backend directly"]
+    S75 --> S76["7.6 APIM operations"]
+    S76 --> S77["7.7 SPA end to end"]
+```
+
+#### 7.1 Migrate Azure SQL
+- [x] Done
+- **Pre-flight:** Step 6 committed; `appsettings.Development.json` confirmed ignored by git
+- **Restore point before migrating:** 2026-10-21 01:55 UTC. Point-in-time restore is on for the free tier; it shows under Essentials on the database Overview (no separate Backups blade). Restore creates a new database rather than overwriting
+- **Script:** `infra/sql/migrate.sql` generated with `dotnet ef migrations script --idempotent` (doesn't connect to any database)
+- **Inspected before running:** AddRagFields block guarded by `IF NOT EXISTS` on __EFMigrationsHistory; defaults `N'[]'`, `N'["oncall-all"]'`, `N'unknown'`; three UPDATE statements each keyed to one Day 1 incident ID
+- **Ran with:** VS Code MSSQL extension against `sql-incident-gowtham.database.windows.net / IncidentDb`. The portal Query editor can't run it because `GO` is a client batch separator, not SQL
+- **Database state:** Status was Paused (serverless auto-pause); first connection woke it. Free monthly vCore seconds: 95,056 remaining, overage billing disabled (pauses instead of charging)
+- **Before:** 4 rows (1111, 2222, 3333 and DF6E63FE...), history had InitialCreate only
+- **After:** `20261024033906_AddRagFields` recorded; still 4 rows; Day 1 rows got `checkout-api`, `notification-service`, `data-pipeline`; DF6E63FE got `unknown`; every row has valid JSON (`[]`, `["oncall-all"]`), `RootCause` NULL
+- **Azure vs local state differs:**
+
+| Incident | Local | Azure |
+| --- | --- | --- |
+| 1111 checkout latency | Resolved | Open |
+| 2222 password reset | InProgress | Resolved (no root cause, no resolution notes) |
+| 3333 nightly ETL | Resolved | Resolved |
+
+- **Test data removed:** DF6E63FE "Should Include Title in Request" was a request validation test row from Day 1/2 testing, Resolved, so it would have been indexed as a meaningless past incident; deleted before 7.2
+
+#### 7.2 Seed Azure SQL and rebuild indexes from it
+- [x] Done
+- **Why from Azure:** local and production share one Search service and the same two indexes (Free tier: one service per subscription, 3 indexes). Production triage loads sources from Azure SQL, so the index should match it. Triage already skips indexed incidents that don't exist in the database it reads (stale index warning), so local development still works
+- **Why from my Mac:** rebuilding needs Search Service Contributor, which only my user has; the app's managed identity can't do it by design
+- **Command:** connection string read with `read -s` (hidden, kept out of shell history), passed as an environment variable for one run, then unset:
+  `ConnectionStrings__DefaultConnection="$AZ_SQL" dotnet run --launch-profile http -- --Reindex=true`
+- **Attempt 1:** pasted the local connection string by mistake; log said `added 0, skipped 37` and reindexed 39, all from the local database
+- **Attempt 2:** correct Azure string but override key `ConnectionStrings__Default`; a startup log of `ConnectionStrings:Default` showed Azure, yet EF still connected locally, because the DbContext reads `ConnectionStrings:DefaultConnection`. Same `skipped 37` and 39
+- **How it was caught:** Azure SQL had only 3 rows, so "skipped 37" and "39 resolved" were impossible there. Totals matched the local database by coincidence (37 + 1111 + 3333 locally, 37 + 2222 + 3333 in Azure)
+- **Fix:** log the database the DbContext actually uses (`Database.GetDbConnection()`), and override the key the code really reads (`DefaultConnection`)
+- **Attempt 3 (correct):**
+  - `Database target: tcp:sql-incident-gowtham.database.windows.net,1433 / IncidentDb`
+  - `Incident seeding: added 37, skipped 0` in one batched INSERT (37 rows, 481 parameters, one round trip, about 245 ms)
+  - `Reindex: 39 resolved incidents` (37 seeded + 2222 + 3333)
+  - incidents-a 39 chunks, incidents-b **77** chunks
+- **Why 77, not 78:** 2222 has no root cause or resolution notes in Azure, so strategy B created only its symptoms chunk
+- **Verified:**
+
+| Check | Result | Proves |
+| --- | --- | --- |
+| Azure SQL total / resolved | 40 / 39 | Seeded |
+| incidents-b documents | 77 | Rebuilt |
+| `incidentId eq '1111...'` | 0 | Built from Azure (1111 is Open there) |
+| `incidentId eq '2222...'` | 1, section symptoms | Built from Azure; empty sections skipped |
+| `service eq 'checkout-api'` | 16 | 8 seeded checkout incidents x 2 chunks |
+| Vector quota | 1.37 MB of 25 MB | Room for roughly 18x more incidents on Free tier |
+
+- **Local effect:** indexes now reflect production. Local 1111 (Resolved) is no longer indexed; local 2222 (InProgress) is indexed because it's Resolved in Azure, and self exclusion keeps it out of its own results
+
+#### 7.3 App Service settings and identity
+- [x] Done
+- **Connection strings:** `DefaultConnection`, type SQLAzure (matches the key the code reads)
+- **App settings:**
+
+| Name | Value |
+| --- | --- |
+| `AzureOpenAI__ApiKey` | (Day 2 key, until the Day 3B Entra switch) |
+| `AzureSearch__Endpoint` | `https://srch-incident-gowtham.search.windows.net` |
+| `AzureSearch__IndexName` | `incidents-b` (was `incidents-v1` in Step 1) |
+| `AzureSearch__IndexNameWholeIncident` | `incidents-a` |
+| `AzureOpenAI__EmbeddingDeployment` | `text-embedding-3-small` |
+| `Seeding__Enabled` | `false` |
+
+- **Seeding off in production:** Azure SQL was seeded in 7.2; production shouldn't load demo data on startup. Local development keeps seeding through `appsettings.json`
+- **Deliberately absent:** `Reindex`, any Search key, `ConnectionStrings__Default`
+- **Identity:** system-assigned managed identity On; Check access confirmed Search Index Data Contributor on `srch-incident-gowtham` and Cognitive Services OpenAI User on `IncidentResolutionAgent`
+
+#### Code and config changes during 7.1 to 7.3
+- `Program.cs`: startup log `Database target: {Server} / {Database}` read from the DbContext's connection (never the password); replaces a first version that logged the configuration value and turned out to be misleading
+- `appsettings.json`: `Microsoft.EntityFrameworkCore.Database.Command` at Warning; `appsettings.Development.json` keeps it at Information
+- `infra/sql/migrate.sql`: committed as the record of what ran against the production schema
+
+#### 7.4 Publish and deploy
+- [ ] Done
+
+#### 7.5 Verify backend directly
+- [ ] Done
+
+#### 7.6 APIM operations
+- [ ] Done
+
+#### 7.7 SPA end to end
+- [ ] Done
+
+#### Learnings: migrating production data
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Deploy in data order | Schema first, then data and index, then settings, then app, then gateway | Deploying an app before its schema exists turns a deploy into an outage |
+| Restore point first | Point-in-time restore was on, shown under Essentials; Restore creates a new database | Know your undo before changing production |
+| Idempotent migration scripts | The script checks __EFMigrationsHistory before each migration, so a rerun after a timeout is safe | Production schema changes should be scripted, inspected and rerunnable |
+| Inspect before running | Checked defaults, guards and that every UPDATE had a WHERE on one ID | Read a script that changes production before executing it |
+| GO is not SQL | Batch separators are handled by tools like sqlcmd and the MSSQL extension, not the server; the portal Query editor fails on them | Choose a tool that understands the script's format |
+| Existing rows during a migration | New NOT NULL columns fill their default into every existing row; UpdateData only touches rows by key, so the SPA-created row came through valid | Valid defaults for existing rows are what make a migration safe on real data |
+| Serverless cold start | The paused database took a moment to wake on first connection | Retry the first connection before troubleshooting |
+| Test data in production | A validation test row was resolved and would have been indexed | Clean test data out of production before building anything from it |
+| Environments drift | 1111 and 2222 have opposite statuses locally and in Azure | Don't assume production state matches local; query it |
+
+#### Learnings: proving where a run went
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Config key names must match exactly | The DbContext reads `ConnectionStrings:DefaultConnection`; overriding `ConnectionStrings__Default` set a key nothing reads, and the run silently used the local database | Read the code for the exact key before overriding config; a wrong key fails silently |
+| Log what the component uses | Logging the configuration value showed Azure while EF connected locally; logging `DbContext.Database.GetDbConnection()` showed the truth | Log the actual target, not what you think the code reads |
+| Coincidental totals | Both databases had 39 resolved incidents for different reasons | When totals coincide, check a record whose state differs between environments (1111 and 2222 here) |
+| Impossible numbers are a signal | "skipped 37" against a 3-row database couldn't be true | Sanity check log output against what you know about the target |
+| Idempotent logs can mislead | "added 0, skipped 37" looks the same for a rerun and for the wrong database | Idempotent output tells you what happened, not where; the target log tells you where |
+| Secrets in the shell | `read -s` hid the connection string and kept it out of history; the environment variable lasted for one command | Keep production credentials off the screen, out of history and out of files |
+| Env var vs command-line override | Command-line arguments outrank every config source but are visible to other processes while running | Prefer an environment variable for secrets; use arguments only when necessary |
+| EF batching | 37 inserts went out as one multi-row INSERT | EF Core batches SaveChanges into few round trips, which matters against a remote database |
+| Empty sections in production data | 2222 in Azure has no resolution notes, so strategy B produced one chunk | Real data is less complete than seed data; the chunker's skip rule mattered the first time it met production |
+
+#### Learnings: environments and configuration
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Shared index across environments | Free tier forced local and production onto one Search service | Environment isolation costs money; when you can't afford it, make the code tolerate the mismatch (stale source handling) |
+| Admin work from the admin's machine | Reindex needs Search Service Contributor, which only my user has | Least privilege means some operations only run from a privileged context, by design |
+| Environment-specific switches | Seeding on locally through appsettings.json, off in production through an App Service setting | Vary behavior per environment with configuration layering, not code |
+| Double underscore mapping | App Service flattens nested config with `__`; a single underscore is a different key | Check every separator when copying setting names |
+| Log levels per environment | EF SQL logging at Information locally, Warning in production | Keep production logs to what you'd act on |
+| Deploy from a commit | Migration script and logging committed before publishing | Production should always run code that exists in history |
+| Migration scripts as records | migrate.sql in the repo shows exactly what ran against the production schema | Commit what you run against production; regenerate it with each new migration |
 
 ## Interview Talking Points (fill as they emerge)
 
