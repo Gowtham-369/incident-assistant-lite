@@ -40,4 +40,9 @@
     <None Update="Seed/incidents.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Test evidence (saved API responses) stays in the repo but never ships -->
+    <Content Update="test-results\**" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
 </Project>
