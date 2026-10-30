@@ -1419,6 +1419,75 @@ flowchart LR
 | jq for spec checks | One-line filters checked version, paths, operation names and schema fields, and removed servers | Check machine-readable artifacts with tools, not by scrolling |
 | APIM in CI/CD | Enterprises keep APIM config in git and apply it from pipelines (az apim api import, Bicep/ARM/Terraform, or APIOps), with specs generated at build time | The portal should be for inspecting what the pipeline did (planned for Day 4) |
 
+#### 7.7 SPA end to end through APIM
+- [x] Done
+- **Run:** `npm run dev` (APIM mode), signed in
+- **Gateway URL:** `https://apim-incident-gowtham.azure-api.net/IncidentAssistant/V1/api/...`
+- **All 8 checks passed:**
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | Incident list | 40 incidents from Azure SQL; 1111 Open, 2222 and 3333 Resolved |
+| 2 | Network | GET incidents and POST triage both to apim-incident-gowtham.azure-api.net, 200 OK |
+| 3 | Panel | High confidence; suggests High / Performance; root cause about leaked SqlConnections in the retry wrapper; 4 steps each with chip [1] |
+| 4 | Chip [1] | Source card for 1004 with symptoms, root cause and resolution |
+| 5 | Sources and similar | 1004 at match 2.80 / 4; "Show other similar incidents (5)" |
+| 6 | Diagnostics | HybridSemantic, evidence Sufficient, top match 2.80 / 4, 5 sources given to the model |
+| 7 | Apply suggestion | Panel closed, 1111 unchanged at High / Performance |
+| 8 | CORS | `Access-Control-Allow-Origin: http://localhost:5173` from APIM; no console errors |
+
+- **Observed:**
+  - First request after an idle period took about 34 s (serverless database resuming; Connect Timeout=60 let it wait)
+  - `incidents` loaded twice: React StrictMode runs effects twice in development only
+  - Response header `Request-Context: appId=cid-v1:...` suggests Application Insights is already attached to App Service (check in 3B)
+  - Step wording differed from the Postman run while root cause, citations and confidence matched
+
+#### Learnings: end to end
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Inside-out verification paid off | By the time the SPA ran, App Service (7.5) and APIM (7.6) had each been proven, so the browser test had nothing left to debug | Verify each layer before the one in front of it |
+| Measured cold start | The first request after idle took about 34 s through the whole stack | Know your worst normal latency; it shapes timeouts, user messaging and tier choices |
+| StrictMode double effects | Development mode ran the list effect twice | Effects must be safe to run twice; production builds run them once |
+| Telemetry may already exist | A Request-Context header revealed Application Insights instrumentation | Check what the platform already provides before adding it yourself |
+| Wording varies, decisions don't | Same incident gave different step wording but the same cause, citations and confidence | On clear evidence, generation is stable where it matters; test the decisions, not the exact text |
+
+#### 7.8 Day 3A close-out
+- [x] Done
+- **Deployed and verified in Azure:** Azure SQL (migrated, seeded), Azure AI Search (incidents-a 39, incidents-b 77, built from Azure SQL), App Service (managed identity to Search and Foundry embeddings), APIM (8 operations from the spec, policies inherited), React SPA through the gateway
+- **Tag:** `day-3a`
+
+**Against the plan's "Done means"**
+
+| Item | Status |
+| --- | --- |
+| POST /triage returns an answer, cited incident IDs and a confidence flag | ✅ Locally and in Azure, through APIM and the SPA |
+| Compare keyword, vector, hybrid and hybrid + rerank on the same queries | ✅ Via /similar?mode= (automated comparison is Day 3B) |
+| Eval report with Recall@5, MRR and groundedness | ⏳ Day 3B |
+| Killing OpenAI or Search returns a degraded response, not a 500 | ◐ OpenAI failure tested (generation_failed); Search failure and timeouts are Day 3B |
+| One Application Insights query reconstructs a request end to end | ⏳ Day 3B |
+
+**Day 3B backlog collected during Day 3A**
+- Golden set: 25 to 30 queries, including the three disagreement queries (paraphrase for 1004, bare `AADSTS50011` for 1017, duplicate shipping emails for 1026) and no-answer queries; borderline queries run 3 to 5 times for decision agreement
+- MinRerankerScore chosen from the eval (correct answers so far 2.6 to 3.3, no-answer cases 1.6 to 1.9)
+- Security: caller groups from the token; AllowedGroups enforced on list, get, update and delete, not only in search; injection ablation; Prompt Shields document check; chat client switched to Entra auth, then API keys disabled on Search and Foundry; APIM rate limit on /triage
+- Failure handling: EnableRetryOnFailure, timeouts, circuit breaker, outbox worker for index freshness, /health
+- Observability: OpenTelemetry spans per RAG stage; check the existing Application Insights connection
+- Day 4: Bicep for App Service, Search and APIM; spec generated at build time; backend URL as a named value; ADO pipeline as the only writer to APIM
+
+#### Day 3A in ten lessons
+| # | Lesson | Where it came from |
+| --- | --- | --- |
+| 1 | Chunk on the document's structure, and keep identifiers out of searchable text | Step 3: section chunks with context headers, GUIDs in fields not content |
+| 2 | Generated schemas need checking: a wrong vector type should fail before any tokens are spent | Step 3: ReadOnlyMemory<float> became a ComplexType |
+| 3 | Easy tests can't separate retrieval methods; measure margins and add hard queries | Step 4: an 8-candidate pool made every mode agree |
+| 4 | Only the reranker score can gate on quality, and the threshold must come from no-answer data | Steps 4 and 5: irrelevant incidents scored 1.6 to 1.9 |
+| 5 | Make bad output impossible where you can (schema enum), validate in code anyway, and decide whether to generate before calling the model | Step 5: citation enum, evidence gate, confidence cap |
+| 6 | Citations prove where an answer came from, not that the source is trustworthy | Step 5: the 1034 injection would have passed citation validation |
+| 7 | Grounding changes correctness, not just detail | Steps 5 and 7: baseline suggested raising the pool size for a leak; RAG found the disposal bug, in local and production runs |
+| 8 | Access control enforced at one door isn't access control | Step 6: search hides 1021, the list endpoint doesn't |
+| 9 | Log what a component actually uses, and know the exact config key it reads | Step 7.2: two runs silently hit the local database |
+| 10 | Production configuration drifts unless something keeps it in git | Step 7.6: the portal added set-backend-service behind my back |
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —
