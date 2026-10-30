@@ -1310,6 +1310,115 @@ flowchart LR
 | Deploy from a commit | Migration script and logging committed before publishing | Production should always run code that exists in history |
 | Migration scripts as records | migrate.sql in the repo shows exactly what ran against the production schema | Commit what you run against production; regenerate it with each new migration |
 
+#### 7.4 Publish and deploy
+- [x] Done
+- **Deployed commit:** <hash> (<subject>)
+- **Publish:** `rm -rf publish app.zip` then `dotnet publish -c Release -o ./publish`; zipped from inside `publish` so the app's files sit at the zip root, where App Service looks for them; deployed with `az webapp deploy --type zip`
+- **Package checks before zipping:**
+  - [x] `publish/Seed/incidents.json` present
+  - [x] no `appsettings.Development.json`
+  - [x] no `password` or `apikey` in any shipped JSON
+  - [x] no `publish/test-results` (excluded in the .csproj with `<Content Update="test-results\**" CopyToPublishDirectory="Never" />`, because the Web SDK publishes every .json in the project folder)
+- **First startup (Log stream):**
+  - `Database target: tcp:sql-incident-gowtham.database.windows.net,1433 / IncidentDb`, `Hosting environment: Production`, `Now listening on: http://[::]:8080`
+  - Seeding still ran: `Seeding__Enabled=false` hadn't been added to App Service yet, so `appsettings.json` (true) applied
+  - Seeding failed with `Connection Timeout Expired` in the post-login phase (`authentication=28`, `Post-Login complete=14023`): login succeeded, then the paused serverless database took longer than the default 15 s connect timeout to resume
+  - The seeding try/catch logged a warning and the API started anyway
+- **Fixes (portal, no republish):**
+  - [x] App setting `Seeding__Enabled=false` added; restart log shows no seeding line
+  - [x] `Connect Timeout=60;` appended to the `DefaultConnection` connection string
+- **Expected and harmless in the log:** `Failed to determine the https port for redirect` (App Service terminates TLS at its front end and forwards plain HTTP on 8080); `Could not find build manifest file at oryx-manifest.toml` (zip deploy ships a prebuilt app, nothing to build)
+- **Verified:** unauthenticated `GET /api/incidents` returned 401 with `WWW-Authenticate: Bearer`; with a token in Postman, `GET /api/incidents` directly against App Service returned the incidents from Azure SQL
+- **Backlog (3B):** `EnableRetryOnFailure` (the stack trace showed the default `SqlServerExecutionStrategy`, which doesn't retry); a health check to warm the database
+
+#### Learnings: publishing and deploying
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Deploy from a commit | Committed the migration script, logging and .csproj change before publishing | Production should always run code that exists in history |
+| Clean publish folder | `rm -rf publish app.zip` before publishing stops files from older builds riding along | Build every release artifact from scratch |
+| Zip structure | Zipping from inside `publish` puts the DLL at the zip root; zipping the folder from outside nests it and App Service can't find the app | The deploy target's expected layout decides how you package |
+| Implicit publish content | The Web SDK publishes every .json in the project folder, so saved test responses would have shipped next to the seed file | Inspect the package for what shouldn't be there, not just what should |
+| Package checks as a habit | Four one-line checks (seed present, dev settings absent, no secrets, no test data) before every zip | Cheap checks on the artifact catch mistakes the build never will |
+| Overrides live outside the package | `appsettings.json` keeps seeding on for local development; the App Service setting turns it off in production without a republish | Defaults in the file, environment differences in the environment's settings; check overrides are in place before verifying a deploy |
+| Reading a SQL timeout | Handshake and authentication took milliseconds, post-login waited 14 s: credentials and firewall were fine, the database was resuming | Connection timing breakdowns show which phase failed; a slow post-login on serverless SQL means cold start |
+| Serverless cold start vs connection timeout | The default 15 s connect timeout is shorter than a serverless resume; `Connect Timeout=60` lets the first request wait | A timeout should cover the slowest normal case; longer timeouts trade fast failure for fewer false failures |
+| Resilience proven in production | Seeding failed on a cold database and the API still started | Optional startup work must never be able to take the app down |
+| HTTPS behind App Service | The app listens on HTTP 8080 and App Service handles TLS, so the redirect middleware has no HTTPS port to find | Some warnings are expected in a hosted environment; know which ones |
+| Logs over deploy polling | The Log stream showed the real startup sequence while the CLI was still polling | Watch the app's own startup log to judge a deploy |
+
+#### 7.5 Verify backend directly
+- [x] Done
+- **Setup:** Postman against the App Service URL directly, Bearer token, no APIM subscription key; responses saved to `test-results/Step7/`
+- **Cold start:** first call after the connection string change took <n> s (Connect Timeout=60 let it wait for the database to resume)
+- **1. Keyword /similar on 1111:** passed; top results <...>; rerankerScore null; proves the managed identity can query Azure AI Search
+- **2. HybridSemantic /similar on 1111:** passed; executedMode HybridSemantic; top <...> at reranker <...>; proves the managed identity can call the Foundry embedding deployment, and the semantic ranker works from App Service
+- **3. RAG /triage on 1111:** passed; degraded none, confidence <...>; steps cite <...>; diagnostics HybridSemantic, evidence Sufficient, invalidCitations 0; proves retrieval, source loading from Azure SQL and generation together in production
+- **4. Baseline /triage on 1111:** passed; baseline_no_retrieval, unassessed
+- **Log stream:** Retrieval and Triage log lines visible from production; no stale index warnings, so the index built in 7.2 matches the database production reads
+
+#### What each call touched
+| Call | Foundry embeddings | Azure AI Search + semantic ranker | Azure SQL | Foundry chat model | Proves |
+| --- | --- | --- | --- | --- | --- |
+| /similar Keyword | no | Search only | incident | no | Managed identity → Search |
+| /similar HybridSemantic | yes | both | incident | no | Managed identity → Foundry embeddings |
+| /triage | yes | both | incident + sources | yes (API key) | The full RAG path |
+| /triage/baseline | no | no | incident | yes (API key) | The chat path alone |
+
+#### Learnings: verifying in production
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Local success proves nothing about the deployed identity | Locally every Azure call used my az login; in App Service the same code used the managed identity with its own role assignments | Verify each outbound dependency again under the deployed identity |
+| Order calls to isolate failures | Keyword search makes no embedding call, so running it before HybridSemantic separates a Search role problem from a Foundry role problem | Design verification so each step adds exactly one new dependency |
+| Who embeds the query | Vector search needs the query as a vector from the same model that embedded the chunks; IncidentRetriever calls text-embedding-3-small before searching | Map each request to every service it touches; it decides which roles and keys each environment needs |
+| The semantic ranker isn't my deployment | It's a Microsoft model inside Azure AI Search, billed to the Search service | Know which costs and failures belong to which service |
+| Two auth methods in one request | /triage reached Search and embeddings with the managed identity and the chat model with an API key | Mixed auth is a migration state worth tracking until the last key is gone (Day 3B) |
+| Test the backend before the gateway | Calling App Service directly first means any APIM failure later is an APIM problem | Verify one layer at a time, inside out |
+| First token is slower | The first managed identity call takes a little longer while the app fetches its token | Expect a warm-up cost on the first call after a restart |
+| Application logs as evidence | The Retrieval and Triage lines in the Log stream confirmed production took the same path as local | Structured logs written for local debugging pay off again in production |
+
+
+#### 7.6 APIM operations
+- [x] Done
+- **Approach changed:** re-imported the OpenAPI spec instead of adding operations by hand, so definitions (schemas) stay in sync with the code
+- **Code:** `[EndpointName]` and `[EndpointSummary]` on every IncidentsController action (stable operation IDs and readable display names in the spec); no extra usings needed, since the Web SDK's implicit global usings already include Microsoft.AspNetCore.Http and Microsoft.AspNetCore.Routing
+- **Spec:** regenerated locally from `/openapi/v1.json` (Development only) into `apim/specs/incident-api.openapi.json`; checked with jq (OpenAPI 3.0, new paths present, operationId and summary on every operation, RAG fields in TriageResult); `servers` (localhost) removed with `jq 'del(.servers)'`, since it overwrote the backend URL on the previous import
+- **Policy drift found:** the live All operations policy had `set-backend-service` with the App Service URL, added by the portal when the backend URL was edited in the Design view; the repo's policy file didn't have it. Copied the live XML into `apim/policies` so the repo matches what runs
+- **Import:** portal → Import → OpenAPI → **Update** (replaces operations and schemas, keeps policies for operations whose template is unchanged); not Append, which would have duplicated the six existing operations with suffixes
+- **After import:** 8 operations with summary display names; TriageResult definition shows summary, steps, confidence, degraded, sources, similarIncidents, diagnostics; Web service URL unchanged; cors, base, validate-jwt, set-backend-service still under All operations; new operations inherit `base` only
+- **Through the gateway (token + subscription key), on 1111:**
+
+| Call | Result |
+| --- | --- |
+| GET /similar?mode=HybridSemantic | executedMode HybridSemantic, incidents-b, 16 chunk hits, no fallback; 1004 (2.80, resolution chunk), 1005 (2.58), 1007 (1.90), 1006 (1.64), 1009 (1.60); identical to the local Step 4 ranking |
+| POST /triage | degraded none, confidence high; root cause "connection pool exhaustion caused by leaked SqlConnections in the retry wrapper"; 4 steps all citing 1004; sources 1004 only; diagnostics HybridSemantic, evidence Sufficient, 5 sources provided, 0 invalid citations, 0 dropped steps |
+| POST /triage/baseline | baseline_no_retrieval, unassessed; 4 generic steps, again including "consider increasing connection pool size" (masks a leak rather than fixing it) |
+
+- **Negative checks on the new operations:**
+
+| Call | Result | Rejected by |
+| --- | --- | --- |
+| /similar without subscription key | 401 "Access denied due to invalid subscription key. Make sure to provide a valid key for an active subscription." | APIM subscription check |
+| /similar with key, without token | 401 "Unauthorized. Valid Entra ID token required." | validate-jwt policy |
+
+- **Responses saved:** test-results/Step7/
+
+#### Learnings: APIM and the OpenAPI spec
+| Topic | What I learned | Takeaway |
+| --- | --- | --- |
+| Spec import vs manual operations | Re-importing the spec added the new operations and refreshed definitions; adding by hand leaves schemas like TriageResult stale | Treat the code's spec as the source of truth and re-import every release; stale definitions mislead consumers even though they don't affect routing |
+| Update vs Append | Update replaces operations and schemas but keeps policies for operations whose template (method + URL) is unchanged; Append adds duplicates with suffixes | Use Update for a new version of the same API |
+| Matching by template | APIM matches operations on re-import by method + URL, not by operation ID | Keep URLs stable; a renamed route is a delete plus a new operation, and loses its operation-level policies |
+| Names from the code | EndpointName and EndpointSummary put operationId and summary in the spec, which APIM uses as display names | Fix import side effects at the source instead of in the portal after every import |
+| servers in the spec | The generated spec pointed at localhost and overwrote the backend URL on import | Strip servers from the committed spec; the gateway owns where the backend lives |
+| Portal edits become policies | Editing the backend URL in the Design view silently added set-backend-service to the live policy | The portal can change config in ways you didn't ask for; compare live config with git |
+| Configuration drift | Live APIM and the repo's policy file disagreed | Copy live state back to the repo now; in CI/CD, make the pipeline the only writer |
+| Policy inheritance | New operations got cors and validate-jwt by inheriting `base` from All operations | Put cross-cutting policies at the API level so new operations are protected by default |
+| Two 401s, two layers | Missing key and missing token each return 401 with a different message | Distinct error messages per layer make it obvious which gate rejected a request |
+| Negative tests on new routes | Both rejections confirmed on /similar | A new route isn't done until you've proven it rejects what it should |
+| Retrieval is reproducible | The gateway returned the same ranking and reranker scores as the local test | Retrieval is deterministic for the same index and query; variation comes from generation |
+| jq for spec checks | One-line filters checked version, paths, operation names and schema fields, and removed servers | Check machine-readable artifacts with tools, not by scrolling |
+| APIM in CI/CD | Enterprises keep APIM config in git and apply it from pipelines (az apim api import, Bicep/ARM/Terraform, or APIOps), with specs generated at build time | The portal should be for inspecting what the pipeline did (planned for Day 4) |
+
 ## Interview Talking Points (fill as they emerge)
 
 - Defense in depth: JWT validated at APIM *and* at the API —

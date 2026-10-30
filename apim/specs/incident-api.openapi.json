@@ -4,17 +4,14 @@
     "title": "IncidentAssistant.Api | v1",
     "version": "1.0.0"
   },
-  "servers": [
-    {
-      "url": "http://localhost:5044/"
-    }
-  ],
   "paths": {
     "/api/Incidents": {
       "get": {
         "tags": [
           "Incidents"
         ],
+        "summary": "List incidents",
+        "operationId": "ListIncidents",
         "parameters": [
           {
             "name": "status",
@@ -67,6 +64,8 @@
         "tags": [
           "Incidents"
         ],
+        "summary": "Create an incident",
+        "operationId": "CreateIncident",
         "requestBody": {
           "content": {
             "application/json": {
@@ -116,6 +115,8 @@
         "tags": [
           "Incidents"
         ],
+        "summary": "Get incident by ID",
+        "operationId": "GetIncidentById",
         "parameters": [
           {
             "name": "id",
@@ -154,6 +155,8 @@
         "tags": [
           "Incidents"
         ],
+        "summary": "Update an incident",
+        "operationId": "UpdateIncident",
         "parameters": [
           {
             "name": "id",
@@ -212,6 +215,8 @@
         "tags": [
           "Incidents"
         ],
+        "summary": "Delete an incident",
+        "operationId": "DeleteIncident",
         "parameters": [
           {
             "name": "id",
@@ -235,6 +240,8 @@
         "tags": [
           "Incidents"
         ],
+        "summary": "Triage an incident using past incidents (RAG)",
+        "operationId": "TriageIncident",
         "parameters": [
           {
             "name": "id",
@@ -269,10 +276,145 @@
           }
         }
       }
+    },
+    "/api/Incidents/{id}/triage/baseline": {
+      "post": {
+        "tags": [
+          "Incidents"
+        ],
+        "summary": "Triage an incident using a baseline approach without retrieval",
+        "operationId": "TriageIncidentBaseline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageResult"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageResult"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Incidents/{id}/similar": {
+      "get": {
+        "tags": [
+          "Incidents"
+        ],
+        "summary": "Get similar incidents",
+        "operationId": "GetSimilarIncidents",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RetrievalMode"
+            }
+          },
+          {
+            "name": "strategy",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/ChunkingStrategy"
+            }
+          },
+          {
+            "name": "top",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimilarIncidentsResponse"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimilarIncidentsResponse"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimilarIncidentsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "ChunkingStrategy": {
+        "type": "integer"
+      },
+      "CitedIncidentDto": {
+        "required": [
+          "incidentId",
+          "title",
+          "service",
+          "rerankerScore"
+        ],
+        "type": "object",
+        "properties": {
+          "incidentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "rerankerScore": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "format": "double",
+            "nullable": true
+          }
+        }
+      },
       "CreateIncidentRequest": {
         "required": [
           "title",
@@ -294,6 +436,17 @@
           "category": {
             "type": "string",
             "nullable": true
+          },
+          "service": {
+            "type": "string",
+            "nullable": true
+          },
+          "errorSignatures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
           }
         }
       },
@@ -307,7 +460,10 @@
           "category",
           "createdAt",
           "resolvedAt",
-          "resolutionNotes"
+          "resolutionNotes",
+          "service",
+          "rootCause",
+          "errorSignatures"
         ],
         "type": "object",
         "properties": {
@@ -343,14 +499,153 @@
           "resolutionNotes": {
             "type": "string",
             "nullable": true
+          },
+          "service": {
+            "type": "string"
+          },
+          "rootCause": {
+            "type": "string",
+            "nullable": true
+          },
+          "errorSignatures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
       "IncidentStatus": {
         "type": "integer"
       },
+      "RetrievalMode": {
+        "type": "integer"
+      },
       "Severity": {
         "type": "integer"
+      },
+      "SimilarIncidentDto": {
+        "required": [
+          "incidentId",
+          "title",
+          "service",
+          "matchedSection",
+          "score",
+          "rerankerScore",
+          "crossService",
+          "matchedContent"
+        ],
+        "type": "object",
+        "properties": {
+          "incidentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "matchedSection": {
+            "type": "string"
+          },
+          "score": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "format": "double"
+          },
+          "rerankerScore": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "format": "double",
+            "nullable": true
+          },
+          "crossService": {
+            "type": "boolean"
+          },
+          "matchedContent": {
+            "type": "string"
+          }
+        }
+      },
+      "SimilarIncidentsResponse": {
+        "required": [
+          "forIncidentId",
+          "requestedMode",
+          "executedMode",
+          "index",
+          "fallbackToAllServices",
+          "chunkHits",
+          "results"
+        ],
+        "type": "object",
+        "properties": {
+          "forIncidentId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestedMode": {
+            "type": "string"
+          },
+          "executedMode": {
+            "type": "string"
+          },
+          "index": {
+            "type": "string"
+          },
+          "fallbackToAllServices": {
+            "type": "boolean"
+          },
+          "chunkHits": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "format": "int32"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SimilarIncidentDto"
+            }
+          }
+        }
+      },
+      "TriageDiagnostics": {
+        "required": [
+          "executedMode",
+          "evidence",
+          "topRerankerScore",
+          "fallbackToAllServices",
+          "sourcesProvided",
+          "invalidCitations",
+          "droppedSteps"
+        ],
+        "type": "object",
+        "properties": {
+          "executedMode": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "topRerankerScore": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "format": "double",
+            "nullable": true
+          },
+          "fallbackToAllServices": {
+            "type": "boolean"
+          },
+          "sourcesProvided": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "format": "int32"
+          },
+          "invalidCitations": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "format": "int32"
+          },
+          "droppedSteps": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "format": "int32"
+          }
+        }
       },
       "TriageResult": {
         "required": [
@@ -370,6 +665,71 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "summary": {
+            "type": "string",
+            "nullable": true
+          },
+          "likelyRootCause": {
+            "type": "string",
+            "nullable": true
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriageStepDto"
+            },
+            "nullable": true
+          },
+          "confidence": {
+            "type": "string",
+            "default": "low"
+          },
+          "degraded": {
+            "type": "string",
+            "default": "none"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CitedIncidentDto"
+            },
+            "nullable": true
+          },
+          "similarIncidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SimilarIncidentDto"
+            },
+            "nullable": true
+          },
+          "diagnostics": {
+            "type": "object",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TriageDiagnostics"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "TriageStepDto": {
+        "required": [
+          "text",
+          "sourceIncidentIds"
+        ],
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "sourceIncidentIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         }
@@ -403,6 +763,21 @@
           },
           "resolutionNotes": {
             "type": "string",
+            "nullable": true
+          },
+          "service": {
+            "type": "string",
+            "nullable": true
+          },
+          "rootCause": {
+            "type": "string",
+            "nullable": true
+          },
+          "errorSignatures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           }
         }

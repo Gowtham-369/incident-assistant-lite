@@ -15,6 +15,8 @@ namespace IncidentAssistant.Api.Controllers;
 public class IncidentsController(IIncidentService service, ITriageService triageService, IRagTriageService ragTriageService) : ControllerBase
 {
     [HttpGet]
+    [EndpointName("ListIncidents")]
+    [EndpointSummary("List incidents")]
     public async Task<ActionResult<IReadOnlyList<IncidentDto>>> GetAll(
         [FromQuery] IncidentStatus? status, [FromQuery] Severity? severity, CancellationToken ct)
     {
@@ -22,10 +24,14 @@ public class IncidentsController(IIncidentService service, ITriageService triage
     }
 
     [HttpGet("{id:guid}")]
+    [EndpointName("GetIncidentById")]
+    [EndpointSummary("Get incident by ID")]
     public async Task<ActionResult<IncidentDto>> GetById(Guid id, CancellationToken ct)
         => await service.GetByIdAsync(id, ct) is { } dto ? Ok(dto) : NotFound();
 
     [HttpPost]
+    [EndpointName("CreateIncident")]
+    [EndpointSummary("Create an incident")]
     public async Task<ActionResult<IncidentDto>> Create(CreateIncidentRequest request, CancellationToken ct)
     {
         var dto = await service.CreateAsync(request, ct);
@@ -33,14 +39,20 @@ public class IncidentsController(IIncidentService service, ITriageService triage
     }
 
     [HttpPut("{id:guid}")]
+    [EndpointName("UpdateIncident")]
+    [EndpointSummary("Update an incident")]
     public async Task<ActionResult<IncidentDto>> Update(Guid id, UpdateIncidentRequest request, CancellationToken ct)
         => await service.UpdateAsync(id, request, ct) is { } dto ? Ok(dto) : NotFound();
 
     [HttpDelete("{id:guid}")]
+    [EndpointName("DeleteIncident")]
+    [EndpointSummary("Delete an incident")]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
         => await service.DeleteAsync(id, ct) ? NoContent() : NotFound();
 
     [HttpPost("{id:guid}/triage")]
+    [EndpointName("TriageIncident")]
+    [EndpointSummary("Triage an incident using past incidents (RAG)")]
     public async Task<ActionResult<TriageResult>> Triage(Guid id, CancellationToken ct)
     {
         var incident = await service.GetByIdAsync(id, ct);
@@ -51,6 +63,8 @@ public class IncidentsController(IIncidentService service, ITriageService triage
     }
 
     [HttpPost("{id:guid}/triage/baseline")]
+    [EndpointName("TriageIncidentBaseline")]
+    [EndpointSummary("Triage an incident using a baseline approach without retrieval")]
     public async Task<ActionResult<TriageResult>> TriageBaseline(Guid id, CancellationToken ct)
     {
         var incident = await service.GetByIdAsync(id, ct);
@@ -61,6 +75,8 @@ public class IncidentsController(IIncidentService service, ITriageService triage
     }
 
     [HttpGet("{id:guid}/similar")]
+    [EndpointName("GetSimilarIncidents")]
+    [EndpointSummary("Get similar incidents")]
     public async Task<ActionResult<SimilarIncidentsResponse>> GetSimilar(
         Guid id,
         [FromServices] IncidentRetriever retriever,

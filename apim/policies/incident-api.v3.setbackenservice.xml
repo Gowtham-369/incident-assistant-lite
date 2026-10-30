@@ -1,0 +1,50 @@
+<!--
+    - Policies are applied in the order they appear.
+    - Position <base/> inside a section to inherit policies from the outer scope.
+    - Comments within policies are not preserved.
+-->
+<!-- Add policies as children to the <inbound>, <outbound>, <backend>, and <on-error> elements -->
+<policies>
+    <!-- Throttle, authorize, validate, cache, or transform the requests -->
+    <inbound>
+        <cors allow-credentials="false">
+            <allowed-origins>
+                <origin>http://localhost:5173</origin>
+            </allowed-origins>
+            <allowed-methods>
+                <method>GET</method>
+                <method>POST</method>
+                <method>PUT</method>
+                <method>DELETE</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>Authorization</header>
+                <header>Content-Type</header>
+                <header>Ocp-Apim-Subscription-key</header>
+            </allowed-headers>
+        </cors>
+        <base />
+        <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized. Valid Entra ID token required.">
+            <openid-config url="https://login.microsoftonline.com/510b3a83-d381-4cf6-9f11-0a8bbb15aa14/v2.0/.well-known/openid-configuration" />
+            <audiences>
+                <audience>api://e40a1eaa-09ea-4fca-b1b9-04de3f65e1cb</audience>
+            </audiences>
+            <issuers>
+                <issuer>https://sts.windows.net/510b3a83-d381-4cf6-9f11-0a8bbb15aa14/</issuer>
+            </issuers>
+        </validate-jwt>
+        <set-backend-service base-url="https://app-incident-gowtham-aqepfqgxffa5dweb.centralus-01.azurewebsites.net" />
+    </inbound>
+    <!-- Control if and how the requests are forwarded to services  -->
+    <backend>
+        <base />
+    </backend>
+    <!-- Customize the responses -->
+    <outbound>
+        <base />
+    </outbound>
+    <!-- Handle exceptions and customize error responses  -->
+    <on-error>
+        <base />
+    </on-error>
+</policies>
